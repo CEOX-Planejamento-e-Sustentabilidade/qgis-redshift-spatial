@@ -220,6 +220,17 @@ def display(value):
     return text if len(text) <= CELL_CHARS else text[:CELL_CHARS] + "…"
 
 
+def set_error(label, error):
+    label.setStyleSheet("color: #c0392b; font-weight: bold;" if error else "")
+    label.setWordWrap(True)
+
+
+def failure_text(task):
+    if task.error is None:
+        return tr("Canceled.")
+    return tr("Query failed: {}").format(str(task.error).strip())
+
+
 def cancel_task(task):
     """Cancel a running task. QGIS deletes the C++ side of a task once it
     finishes, so a finished one raises RuntimeError: nothing to cancel."""
@@ -329,6 +340,7 @@ class PreviewDialog(QDialog):
         self.source = source
         self.task = None
         self.done = False
+        self.map_note = ""
         self.setWindowTitle(tr("Preview {}").format(sources.label(source)))
         self.setWindowIcon(icon())
         self.resize(900, 520)
@@ -341,6 +353,8 @@ class PreviewDialog(QDialog):
         self.limit.setValue(sql.PREVIEW_ROWS)
         apply = QPushButton(tr("Apply"))
         apply.clicked.connect(self.run)
+        self.filter_map = QCheckBox(tr("Also filter this table's layers on the map"))
+        self.filter_map.setChecked(True)
         top = QHBoxLayout()
         top.addWidget(QLabel(tr("WHERE")))
         top.addWidget(self.where, 1)
@@ -358,6 +372,7 @@ class PreviewDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addLayout(top)
+        layout.addWidget(self.filter_map)
         layout.addWidget(self.filter)
         layout.addWidget(self.status)
         layout.addWidget(self.table, 1)
@@ -373,6 +388,7 @@ class PreviewDialog(QDialog):
             sql.table_ref(self.source["schema"], self.source["table"]), self.limit.value(), self.where.text()
         )
         self.status.setText(tr("Running…"))
+        self.map_note = self.filter_on_map()
         task = self.controller.run_query(self.conn, query, sources.label(self.source), self.show_result, self)
         if task is None:
             self.status.setText(tr("Canceled."))
@@ -385,9 +401,28 @@ class PreviewDialog(QDialog):
         if ok:
             self.table.set_result(task.headers, task.rows)
             self.filter.set_columns(task.headers)
-            self.status.setText(tr("{} rows.").format(len(task.rows)))
+            self.status.setText(tr("{} rows.").format(len(task.rows)) + self.map_note)
+            set_error(self.status, False)
         else:
-            self.status.setText(str(task.error).strip() if task.error else tr("Canceled."))
+            # Never leave the previous rows on screen: they look like an
+            # unfiltered result.
+            self.table.set_result([], [])
+            self.status.setText(failure_text(task))
+            set_error(self.status, bool(task.error))
+
+    def filter_on_map(self):
+        """Apply the WHERE to the layers loaded from this table; returns a
+        note for the status line."""
+        if not self.filter_map.isChecked():
+            return ""
+        where = sql.clean_filter(self.where.text())
+        done, failed = self.controller.filter_layers(sources.label(self.source), where)
+        note = ""
+        if done:
+            note += tr(" Map: {} layer(s) filtered.").format(len(done)) if where else tr(" Map: filter removed from {} layer(s).").format(len(done))
+        if failed:
+            note += tr(" Map: {} layer(s) did not accept this filter (use simple SQL).").format(len(failed))
+        return note
 
     def show_on_map(self, item):
         if not self.source["column"]:
@@ -513,8 +548,11 @@ class SqlDialog(QDialog):
         self.run_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
         if not ok:
-            self.status.setText(str(task.error).strip() if task.error else tr("Canceled."))
+            self.table.set_result([], [])
+            self.status.setText(failure_text(task))
+            set_error(self.status, bool(task.error))
             return
+        set_error(self.status, False)
         self.table.set_result(task.headers, task.rows)
         self.filter.set_columns(task.headers)
         self.status.setText(tr("{} rows shown (at most {}).").format(len(task.rows), sql.SQL_PREVIEW_ROWS))

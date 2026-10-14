@@ -25,6 +25,8 @@ from . import compat, connections, sources, sql
 from .loader import LoadTask, QueryTask
 
 LOG_TAG = "Redshift Spatial"
+# Marks the layers a load created, so a preview can filter them later.
+SOURCE_PROPERTY = "redshift_spatial/source"
 FAMILIES = ("point", "line", "polygon", "collection")
 ICON_PATH = os.path.join(os.path.dirname(__file__), "icon.svg")
 
@@ -189,6 +191,7 @@ class Controller:
             name = f"{base} ({fam})" if many else base
             layer = QgsVectorLayer(f"{path}|layername={layer_name}", name, "ogr")
             if layer.isValid():
+                layer.setCustomProperty(SOURCE_PROPERTY, label)
                 QgsProject.instance().addMapLayer(layer)
             QgsMessageLog.logMessage(f"{name}: {count} features in {path}", LOG_TAG, compat.INFO)
         total = sum(r[3] for r in task.results)
@@ -248,6 +251,31 @@ class Controller:
         QgsProject.instance().addMapLayer(layer)
         self.record_layers[key] = layer.id()
         return layer
+
+    def layers_for(self, label):
+        """Layers in the project that a load of this source created."""
+        return [
+            layer for layer in QgsProject.instance().mapLayers().values()
+            if layer.customProperty(SOURCE_PROPERTY) == label
+        ]
+
+    def filter_layers(self, label, where):
+        """Apply a WHERE (empty = no filter) to this source's layers, as the
+        layer's own "Filter…" would. The layers are GeoPackages, so the
+        expression must also be valid SQLite; simple comparisons are.
+        Returns (filtered layers, layers that rejected the expression)."""
+        done, failed = [], []
+        for layer in self.layers_for(label):
+            previous = layer.subsetString()
+            # The OGR provider accepts any text; an expression SQLite cannot
+            # run only shows up as an unknown feature count (-1).
+            if layer.setSubsetString((where or "").strip()) and layer.featureCount() >= 0:
+                done.append(layer)
+            else:
+                layer.setSubsetString(previous)
+                failed.append(layer)
+            layer.triggerRepaint()
+        return done, failed
 
     def message(self, text, level):
         if self.iface is not None:

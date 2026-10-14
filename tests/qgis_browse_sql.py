@@ -382,3 +382,54 @@ def test_double_click_in_preview_and_sql_window():
     finally:
         connections.names, connections.load = original
         QgsProject.instance().removeAllMapLayers()
+
+
+def test_preview_filter_also_filters_the_tables_layers_on_the_map():
+    from qgis.core import QgsProject
+
+    rows = [(i, f"code-{i}", hex_wkb(f"POINT({i} {i})")) for i in range(6)]
+    fake = FakeRedshift([("id", "integer"), ("code", "character varying(20)"), ("shape", "geometry")], rows)
+    source = sources.table("s", "parcels", "shape")
+    task, ok = run_load(fake, source)
+    ctl = SyncController(fake)
+    Controller.task_finished(ctl, task, ok)
+    (layer,) = ctl.layers_for("s.parcels")
+    assert layer.featureCount() == 6
+
+    dlg = dialog.PreviewDialog(ctl, CONN, source)
+    dlg.where.setText("code = 'code-3'")
+    dlg.run()
+    assert layer.subsetString() == "code = 'code-3'" and layer.featureCount() == 1
+    assert "1 layer(s) filtered" in dlg.status.text()
+
+    dlg.where.setText("code ~ '^code-3$'")  # POSIX regex: valid in Redshift, not in SQLite
+    dlg.run()
+    assert "did not accept" in dlg.status.text()
+    assert layer.subsetString() == "code = 'code-3'" and layer.featureCount() == 1  # previous kept
+
+    dlg.where.setText("")
+    dlg.run()
+    assert layer.subsetString() == "" and layer.featureCount() == 6
+
+    dlg.filter_map.setChecked(False)
+    dlg.where.setText("id = 1")
+    dlg.run()
+    assert layer.subsetString() == ""
+    QgsProject.instance().removeAllMapLayers()
+
+
+def test_preview_error_clears_the_old_rows():
+    fake = FakeRedshift([("id", "integer")], [(i,) for i in range(5)])
+    ctl = SyncController(fake)
+    dlg = dialog.PreviewDialog(ctl, CONN, sources.table("s", "t"))
+    assert dlg.table.rowCount() == 5
+    fake.fail_on = "WHERE"
+    fake.error = RuntimeError('column "MT-1" does not exist')
+    dlg.where.setText('codigo = "MT-1"')
+    dlg.run()
+    assert dlg.table.rowCount() == 0
+    assert dlg.status.text().startswith("Query failed:") and "does not exist" in dlg.status.text()
+    fake.fail_on = None
+    dlg.where.setText("WHERE id = 2")
+    dlg.run()
+    assert ctl.queries[-1] == 'SELECT * FROM "s"."t" WHERE (id = 2) LIMIT 100'

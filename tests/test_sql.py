@@ -204,3 +204,12 @@ def test_iso_wkb_passes_through_and_garbage_fails():
 def test_preview_query_with_filter():
     assert sql.preview_query(T, 50, "a = 1") == 'SELECT * FROM "s"."t" WHERE (a = 1) LIMIT 50'
     assert sql.preview_query(T, 50, " ") == 'SELECT * FROM "s"."t" LIMIT 50'
+
+
+def test_filter_accepts_a_typed_where_keyword():
+    assert sql.clean_filter("WHERE a = 1;") == "a = 1"
+    assert sql.clean_filter("  where   a = 1 ") == "a = 1"
+    assert sql.clean_filter("whereabouts = 'x'") == "whereabouts = 'x'"
+    assert sql.clean_filter("WHERE") == ""
+    assert sql.preview_query(T, 5, "WHERE id = 7") == 'SELECT * FROM "s"."t" WHERE (id = 7) LIMIT 5'
+    assert sql.count_query(T, None, "where x > 1") == 'SELECT COUNT(*) FROM "s"."t" WHERE (x > 1)'

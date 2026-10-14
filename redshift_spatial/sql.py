@@ -163,13 +163,23 @@ def preview_query(from_clause, limit=PREVIEW_ROWS, where=None):
     return f"SELECT * FROM {from_clause}{_where(None, where)} LIMIT {int(limit)}"
 
 
+def clean_filter(where):
+    """The filter as typed, minus a leading WHERE keyword and a trailing
+    semicolon: the plugin writes the WHERE itself."""
+    text = (where or "").strip().rstrip(";").strip()
+    if text[:6].lower() == "where " or text.lower() == "where":
+        text = text[5:].strip()
+    return text
+
+
 def _where(geom_expr, where):
     """' WHERE ...' or ''."""
     parts = []
     if geom_expr:
         parts.append(f"{geom_expr} IS NOT NULL")
-    if where and where.strip():
-        parts.append(f"({where.strip()})")
+    where = clean_filter(where)
+    if where:
+        parts.append(f"({where})")
     return " WHERE " + " AND ".join(parts) if parts else ""
 
 
