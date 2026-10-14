@@ -19,14 +19,20 @@ GeoPackage that QGIS opens natively.
 
 ## Features
 
-- **Browser panel entry "Redshift Spatial"**: connection > schema > table.
-  Double click a table to add it, or right click for *Add Layer with
-  Filter…*. (Dragging onto the map needs a native data provider, which
-  Redshift lacks.)
+- **Browser panel entry "Redshift Spatial"**: connection > schema > table >
+  columns. Double click a table to add it; right click for *Add Layer with
+  Filter…* and *Preview Rows…*. (Dragging onto the map needs a native data
+  provider, which Redshift lacks.)
+- **Execute SQL…** (Browser connection menu or *Database → Redshift
+  Spatial*): run any `SELECT`, see the first rows and add the result as a
+  layer, picking the geometry column, or as a table without geometry.
+  Queries always run wrapped as a subquery, so they cannot change data.
+- **Tables without geometry** (optional, per connection: *Also list tables
+  without geometry*) load as attribute tables, e.g. to join with a layer.
 - Saved connections; passwords live only in the QGIS authentication database
   (or are asked for once per session).
-- Lists every geometry/geography column visible to the user, from
-  `SVV_COLUMNS` (late-binding views included).
+- Spatial columns are discovered from `SVV_COLUMNS` (late-binding views
+  included).
 - Optional `WHERE` filter and row limit.
 - CRS from `ST_SRID`; a fallback CRS for SRID 0.
 - Runs as a background task with progress and cancel.

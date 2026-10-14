@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 CEOX Planejamento e Otimização
-"""Dialogs: saved connections, load options and the "Add Redshift layer" window."""
+"""Dialogs: saved connections, load options, the "Add layer" window, row
+previews and the SQL window."""
 
 from qgis.core import QgsCoordinateReferenceSystem
 from qgis.gui import QgsAuthConfigSelect, QgsFileWidget, QgsProjectionSelectionWidget
-from qgis.PyQt.QtGui import QCursor
+from qgis.PyQt.QtGui import QCursor, QFontDatabase, QKeySequence
 from qgis.PyQt.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -15,18 +17,23 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from . import compat, connections, db
+from . import compat, connections, db, sources, sql
 from .controller import icon, tr
 
 SSL_MODES = ["require", "verify-ca", "verify-full", "prefer", "allow", "disable"]
+CELL_CHARS = 200
 
 
 class WaitCursor:
@@ -60,6 +67,8 @@ class ConnectionDialog(QDialog):
         self.username.setPlaceholderText(tr("used when no authentication is selected"))
         self.auth = QgsAuthConfigSelect(self, "postgres")
         self.auth.setConfigId(conn["authcfg"])
+        self.list_all = QCheckBox(tr("Also list tables without geometry"))
+        self.list_all.setChecked(bool(conn.get("list_all_tables")))
 
         form = QFormLayout()
         form.addRow(tr("Name"), self.name)
@@ -69,6 +78,7 @@ class ConnectionDialog(QDialog):
         form.addRow(tr("SSL mode"), self.sslmode)
         form.addRow(tr("Username"), self.username)
         form.addRow(tr("Authentication"), self.auth)
+        form.addRow("", self.list_all)
 
         test = QPushButton(tr("Test Connection"))
         test.clicked.connect(self.test)
@@ -93,6 +103,7 @@ class ConnectionDialog(QDialog):
             "sslmode": self.sslmode.currentText(),
             "username": self.username.text().strip(),
             "authcfg": self.auth.configId(),
+            "list_all_tables": self.list_all.isChecked(),
         }
 
     def test(self):
@@ -143,7 +154,7 @@ def remove_connection(name, parent=None):
 class OptionsForm(QWidget):
     """Filter, limit, fallback CRS and output file of a load."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, with_crs=True):
         super().__init__(parent)
         self.where = QLineEdit()
         self.where.setPlaceholderText(tr("optional SQL filter, e.g. region = 'north'"))
@@ -161,7 +172,8 @@ class OptionsForm(QWidget):
         form.setContentsMargins(0, 0, 0, 0)
         form.addRow(tr("Filter (WHERE)"), self.where)
         form.addRow(tr("Row limit"), self.limit)
-        form.addRow(tr("CRS when SRID is 0"), self.crs)
+        if with_crs:
+            form.addRow(tr("CRS when SRID is 0"), self.crs)
         form.addRow(tr("Save to"), self.output)
 
     def options(self):
@@ -178,19 +190,229 @@ class LoadOptionsDialog(QDialog):
 
     def __init__(self, source, parent=None):
         super().__init__(parent)
-        schema, table, column, _ = source
-        self.setWindowTitle(tr("Add {}.{}").format(schema, table))
+        self.setWindowTitle(tr("Add {}").format(sources.label(source)))
         self.setWindowIcon(icon())
-        self.form = OptionsForm()
+        self.form = OptionsForm(with_crs=bool(source["column"]))
         buttons = QDialogButtonBox(compat.CANCEL)
         buttons.addButton(tr("Add Layer"), compat.ACCEPT_ROLE)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"{schema}.{table} ({column})"))
+        detail = f" ({source['column']})" if source["column"] else tr(" (no geometry)")
+        layout.addWidget(QLabel(sources.label(source) + detail))
         layout.addWidget(self.form)
         layout.addWidget(buttons)
         self.resize(520, self.sizeHint().height())
+
+
+# results ------------------------------------------------------------------------
+
+
+def display(value):
+    """Short text for a grid cell; geometries and binaries are summarized."""
+    if value is None:
+        return "NULL"
+    if sql.looks_like_wkb(value):
+        return tr("<WKB/binary, {} bytes>").format(len(value) // 2)
+    text = str(value)
+    return text if len(text) <= CELL_CHARS else text[:CELL_CHARS] + "…"
+
+
+class ResultsTable(QTableWidget):
+    def set_result(self, headers, rows):
+        self.clear()
+        self.setColumnCount(len(headers))
+        self.setRowCount(len(rows))
+        self.setHorizontalHeaderLabels(list(headers))
+        for r, row in enumerate(rows):
+            for c, value in enumerate(row):
+                item = QTableWidgetItem(display(value))
+                if value is not None and len(str(value)) > CELL_CHARS and not sql.looks_like_wkb(value):
+                    item.setToolTip(str(value)[:2000])
+                self.setItem(r, c, item)
+        self.resizeColumnsToContents()
+        for c in range(self.columnCount()):
+            self.setColumnWidth(c, min(self.columnWidth(c), 320))
+
+
+class PreviewDialog(QDialog):
+    """First rows of a table, without creating a layer."""
+
+    def __init__(self, controller, conn, source, parent=None):
+        super().__init__(parent)
+        self.controller = controller
+        self.task = None
+        self.setWindowTitle(tr("Preview {}").format(sources.label(source)))
+        self.setWindowIcon(icon())
+        self.resize(900, 480)
+        self.status = QLabel(tr("Running…"))
+        self.table = ResultsTable()
+        buttons = QDialogButtonBox(compat.CLOSE)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.status)
+        layout.addWidget(self.table, 1)
+        layout.addWidget(buttons)
+        query = sql.preview_query(sql.table_ref(source["schema"], source["table"]))
+        self.task = controller.run_query(conn, query, sources.label(source), self.show_result, self)
+        if self.task is None:
+            self.status.setText(tr("Canceled."))
+
+    def show_result(self, task, ok):
+        if ok:
+            self.table.set_result(task.headers, task.rows)
+            self.status.setText(tr("First {} rows.").format(len(task.rows)))
+        else:
+            self.status.setText(str(task.error) if task.error else tr("Canceled."))
+
+    def reject(self):
+        if self.task is not None and not self.task.isCanceled():
+            self.task.cancel()
+        super().reject()
+
+
+class SqlDialog(QDialog):
+    """Run any SELECT, look at the first rows and load the result as a
+    layer (or a table, without geometry). The query always runs wrapped as a
+    subquery, so statements that change data cannot run."""
+
+    NO_GEOMETRY = tr("(no geometry)")
+
+    def __init__(self, controller, conn_name=None, parent=None):
+        super().__init__(parent)
+        self.controller = controller
+        self.task = None
+        self.setWindowTitle(tr("Redshift Spatial — SQL"))
+        self.setWindowIcon(icon())
+        self.resize(960, 720)
+
+        self.conn_combo = QComboBox()
+        self.conn_combo.addItems(connections.names())
+        if conn_name:
+            self.conn_combo.setCurrentText(conn_name)
+
+        self.editor = QPlainTextEdit()
+        self.editor.setFont(QFontDatabase.systemFont(compat.FIXED_FONT))
+        self.editor.setPlaceholderText("SELECT id, name, geom\nFROM analytics.parcels\nWHERE region = 'north'")
+        self.run_button = QPushButton(tr("Execute"))
+        self.run_button.setShortcut(QKeySequence("Ctrl+Return"))
+        self.run_button.setToolTip("Ctrl+Enter")
+        self.run_button.clicked.connect(self.execute)
+        self.cancel_button = QPushButton(tr("Cancel"))
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.cancel)
+        self.status = QLabel(tr("Only SELECT queries; the first {} rows are shown.").format(sql.SQL_PREVIEW_ROWS))
+        self.table = ResultsTable()
+
+        self.geometry = QComboBox()
+        self.geometry.addItem(self.NO_GEOMETRY)
+        self.layer_name = QLineEdit("query")
+        self.form = OptionsForm()
+        load = QPushButton(tr("Add Layer"))
+        load.clicked.connect(self.load)
+
+        top = QHBoxLayout()
+        top.addWidget(QLabel(tr("Connection")))
+        top.addWidget(self.conn_combo, 1)
+        top.addWidget(self.run_button)
+        top.addWidget(self.cancel_button)
+
+        load_form = QFormLayout()
+        load_form.addRow(tr("Geometry column"), self.geometry)
+        load_form.addRow(tr("Layer name"), self.layer_name)
+        bottom = QWidget()
+        bottom_layout = QVBoxLayout(bottom)
+        bottom_layout.addWidget(self.status)
+        bottom_layout.addWidget(self.table, 1)
+        bottom_layout.addLayout(load_form)
+        bottom_layout.addWidget(self.form)
+        bottom_layout.addWidget(load)
+
+        splitter = QSplitter()
+        splitter.setOrientation(compat.VERTICAL)
+        splitter.addWidget(self.editor)
+        splitter.addWidget(bottom)
+        splitter.setStretchFactor(1, 2)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(top)
+        layout.addWidget(splitter, 1)
+
+    def connection(self):
+        name = self.conn_combo.currentText()
+        if not name:
+            QMessageBox.information(self, tr("No connection"), tr("Create a connection first."))
+            return None
+        return connections.load(name)
+
+    def query_text(self):
+        try:
+            return sql.clean_query(self.editor.toPlainText())
+        except ValueError:
+            QMessageBox.information(self, tr("Empty query"), tr("Write a SELECT first."))
+            return None
+
+    def execute(self):
+        conn, text = self.connection(), self.query_text()
+        if conn is None or text is None:
+            return
+        preview = sql.preview_query(sql.query_from(text), sql.SQL_PREVIEW_ROWS)
+        self.status.setText(tr("Running…"))
+        self.run_button.setEnabled(False)
+        self.task = self.controller.run_query(conn, preview, "SQL", self.show_result, self)
+        if self.task is None:
+            self.run_button.setEnabled(True)
+            self.status.setText(tr("Canceled."))
+        else:
+            self.cancel_button.setEnabled(True)
+
+    def cancel(self):
+        if self.task is not None:
+            self.task.cancel()
+
+    def show_result(self, task, ok):
+        self.task = None
+        self.run_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+        if not ok:
+            self.status.setText(str(task.error).strip() if task.error else tr("Canceled."))
+            return
+        self.table.set_result(task.headers, task.rows)
+        self.status.setText(tr("{} rows shown (at most {}).").format(len(task.rows), sql.SQL_PREVIEW_ROWS))
+        previous = self.geometry.currentText()
+        self.geometry.clear()
+        self.geometry.addItem(self.NO_GEOMETRY)
+        self.geometry.addItems(list(task.headers))
+        guess = guess_geometry_column(task.headers, task.rows)
+        if previous in task.headers:
+            self.geometry.setCurrentText(previous)
+        elif guess:
+            self.geometry.setCurrentText(guess)
+
+    def load(self):
+        conn, text = self.connection(), self.query_text()
+        if conn is None or text is None:
+            return
+        column = self.geometry.currentText()
+        column = None if column == self.NO_GEOMETRY else column
+        name = self.layer_name.text().strip() or "query"
+        self.controller.load(conn, sources.query(text, column, name), self.form.options(), self)
+
+    def reject(self):
+        self.cancel()
+        super().reject()
+
+
+def guess_geometry_column(headers, rows):
+    """First column whose values look like WKB in the preview."""
+    for c, name in enumerate(headers):
+        values = [row[c] for row in rows if row[c] is not None]
+        if values and all(sql.looks_like_wkb(v) for v in values[:20]):
+            return name
+    return None
+
+
+# Add layer window -----------------------------------------------------------------
 
 
 class LoadLayerDialog(QDialog):
@@ -225,6 +447,10 @@ class LoadLayerDialog(QDialog):
         self.form = OptionsForm()
 
         buttons = QDialogButtonBox(compat.CLOSE)
+        btn_preview = buttons.addButton(tr("Preview Rows"), compat.ACTION_ROLE)
+        btn_preview.clicked.connect(lambda: self.preview(self.tree.currentItem()))
+        btn_sql = buttons.addButton(tr("SQL…"), compat.ACTION_ROLE)
+        btn_sql.clicked.connect(self.open_sql)
         btn_load = buttons.addButton(tr("Add Layer"), compat.ACCEPT_ROLE)
         btn_load.clicked.connect(lambda: self.load(self.tree.currentItem()))
         buttons.rejected.connect(self.reject)
@@ -279,24 +505,23 @@ class LoadLayerDialog(QDialog):
             return
         try:
             with WaitCursor():
-                rows = db.list_spatial_columns(params)
+                rows = db.list_tables(params, conn["list_all_tables"])
         except Exception as e:
             QMessageBox.critical(self, tr("Connection failed"), str(e))
             return
         self.tree.clear()
         schemas = {}
-        for schema, table, column, data_type in rows:
+        for row in rows:
+            schema, table, column, data_type = row
             parent = schemas.get(schema)
             if parent is None:
                 parent = schemas[schema] = QTreeWidgetItem(self.tree, [schema])
-            item = QTreeWidgetItem(parent, [table, column, data_type])
-            item.setData(0, compat.USER_ROLE, (schema, table, column, data_type))
+            item = QTreeWidgetItem(parent, [table, column or "", data_type or tr("no geometry")])
+            item.setData(0, compat.USER_ROLE, sources.from_row(row))
         self.tree.expandAll()
         self.tree.resizeColumnToContents(0)
         if not rows:
-            QMessageBox.information(
-                self, tr("No spatial tables"), tr("No GEOMETRY or GEOGRAPHY column is visible to this user.")
-            )
+            QMessageBox.information(self, tr("No tables"), tr("No table is visible to this user."))
         self.filter_tree(self.search.text())
 
     def filter_tree(self, text):
@@ -311,11 +536,23 @@ class LoadLayerDialog(QDialog):
                 visible += hit
             parent.setHidden(visible == 0)
 
-    def load(self, item):
+    def selected_source(self, item):
         source = item.data(0, compat.USER_ROLE) if item else None
         if not source:
             QMessageBox.information(self, tr("Choose a table"), tr("Select a table in the list."))
-            return
-        conn = self.current_connection()
+        return source
+
+    def load(self, item):
+        source = self.selected_source(item)
+        conn = self.current_connection() if source else None
         if conn is not None:
             self.controller.load(conn, source, self.form.options(), self)
+
+    def preview(self, item):
+        source = self.selected_source(item)
+        conn = self.current_connection() if source else None
+        if conn is not None:
+            PreviewDialog(self.controller, conn, source, self).show()
+
+    def open_sql(self):
+        SqlDialog(self.controller, self.conn_combo.currentText(), self).show()

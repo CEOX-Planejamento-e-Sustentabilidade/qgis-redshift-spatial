@@ -17,9 +17,16 @@ class FakeRedshift:
     srids:   [(srid, count)] for the SRID sample
     rows:    data rows, attributes in column order and WKB last
     fail_on: substring of a query that raises `error`
+    description: [(name, type_oid)] that SELECT * FROM (query) reports
+    spatial / plain: rows for the two table-listing queries
     """
 
-    def __init__(self, columns, rows, srids=((4326, 1),), fail_on=None, error=None):
+    def __init__(self, columns, rows, srids=((4326, 1),), fail_on=None, error=None,
+                 description=None, spatial=(), plain=()):
+        self.description = list(description or [])
+        self.spatial = list(spatial)
+        self.plain = list(plain)
+        self.canceled = 0
         self.columns = list(columns)
         self.rows = list(rows)
         self.srids = list(srids)
@@ -39,6 +46,9 @@ class _Connection:
     def cursor(self):
         return _Cursor(self.db)
 
+    def cancel(self):
+        self.db.canceled += 1
+
     def close(self):
         self.db.closed += 1
 
@@ -48,6 +58,7 @@ class _Cursor:
         self.db = db
         self.result = []
         self.pending = []
+        self.description = None
 
     def __enter__(self):
         return self
@@ -60,7 +71,19 @@ class _Cursor:
         self.db.queries.append((q, params))
         if self.db.fail_on and self.db.fail_on in q:
             raise self.db.error
-        if q.startswith("SELECT column_name"):
+        if q.startswith("SELECT * FROM (") and q.endswith("LIMIT 0"):
+            self.description = [(name, oid, None, None, None, None, None) for name, oid in self.db.description]
+            self.result = []
+        elif q.startswith("SELECT * FROM"):
+            n = int(q.rsplit("LIMIT", 1)[1])
+            names = [d[0] for d in self.db.description] or [c[0] for c in self.db.columns]
+            self.description = [(name, 25, None, None, None, None, None) for name in names]
+            self.result = list(self.db.rows[:n])
+        elif q.startswith("SELECT table_schema, table_name, column_name"):
+            self.result = list(self.db.spatial)
+        elif q.startswith("SELECT table_schema, table_name FROM"):
+            self.result = list(self.db.plain)
+        elif q.startswith("SELECT column_name"):
             self.result = list(self.db.columns)
         elif q.startswith("SELECT ST_SRID"):
             self.result = list(self.db.srids)

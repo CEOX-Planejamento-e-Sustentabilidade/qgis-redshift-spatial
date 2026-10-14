@@ -19,7 +19,7 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QDate, QDateTime, QTime
 
-from . import compat, db, sql
+from . import compat, db, sources, sql
 
 FIELD_TYPES = compat.FIELD_TYPES
 
@@ -65,9 +65,13 @@ class FeatureSink:
     polygon, collection) gets its own file; the first family uses the path as
     given, the next ones get a _<family> suffix. Single geometries are
     promoted to multi so POLYGON and MULTIPOLYGON share a layer.
+
+    With geometry=False every row goes to one table without geometry
+    (family "table") and the wkb argument is ignored.
     """
 
-    def __init__(self, path, layer_name, fields, kinds, crs):
+    def __init__(self, path, layer_name, fields, kinds, crs, geometry=True):
+        self.geometry = geometry
         self.path = path
         self.layer_name = layer_name
         self.fields = fields
@@ -114,7 +118,15 @@ class FeatureSink:
         self._paths[fam] = path
         return writer
 
-    def add(self, attributes, wkb):
+    def add(self, attributes, wkb=None):
+        if not self.geometry:
+            writer = self._writer("table", compat.NO_GEOMETRY)
+            feature = QgsFeature(self.fields)
+            feature.setAttributes([convert(v, k) for v, k in zip(attributes, self.kinds)])
+            if not writer.addFeature(feature):
+                raise RuntimeError(writer.errorMessage())
+            self._counts["table"] += 1
+            return
         data = sql.wkb_bytes(wkb)
         geom = QgsGeometry()
         if data:
@@ -148,13 +160,16 @@ class FeatureSink:
 
 class LoadTask(QgsTask):
     """Runs off the main thread. It touches no widget; the layers are added
-    to the project by the callback, which QGIS runs on the main thread."""
+    to the project by the callback, which QGIS runs on the main thread.
+
+    source: see sources.py (a table column, a table without geometry or a
+    SQL query)."""
 
     def __init__(self, params, source, options, on_finished):
-        schema, table, column, data_type = source
-        super().__init__(f"Redshift: {schema}.{table}", compat.CAN_CANCEL)
+        super().__init__(f"Redshift: {sources.label(source)}", compat.CAN_CANCEL)
         self.params = params
         self.source = source
+        self.label = sources.label(source)
         self.options = options  # where, limit, path, fallback_crs
         self.on_finished = on_finished
         self.results = []
@@ -162,58 +177,86 @@ class LoadTask(QgsTask):
         self.error = None
         self.invalid = 0
 
+    def _attributes(self, cur):
+        """(select expressions, kinds, QgsFields) of every non-geometry column."""
+        src = self.source
+        selects, kinds, names = [], [], []
+        if src["kind"] == "table":
+            cur.execute(sql.LIST_COLUMNS, (src["schema"], src["table"]))
+            for name, col_type in cur.fetchall():
+                if name == src["column"]:
+                    continue
+                attr = sql.attribute_column(name, col_type)
+                if attr is None:
+                    self.messages.append(f"Skipped column {name} ({col_type}).")
+                    continue
+                selects.append(attr[0])
+                kinds.append(attr[1])
+                names.append(name)
+        else:
+            # Types come from the result description; unknown ones (SUPER,
+            # other geometries...) arrive as text and are kept as strings.
+            cur.execute(sql.describe_query(src["sql"]))
+            for column in cur.description:
+                name, oid = column[0], column[1]
+                if name == src["column"]:
+                    continue
+                selects.append(sql.quote_ident(name))
+                kinds.append(sql.kind_for_oid(oid))
+                names.append(name)
+        fields = QgsFields()
+        for name, kind in zip(sql.unique_names(names), kinds):
+            fields.append(QgsField(name, FIELD_TYPES[kind]))
+        return selects, kinds, fields
+
+    def _crs(self, cur, from_clause, geom_expr, where):
+        cur.execute(sql.srid_query(from_clause, geom_expr, where))
+        srids = cur.fetchall()
+        crs = self.options["fallback_crs"]
+        if srids and srids[0][0]:
+            found = QgsCoordinateReferenceSystem(f"EPSG:{srids[0][0]}")
+            if found.isValid():
+                crs = found
+            else:
+                self.messages.append(f"SRID {srids[0][0]} is unknown to QGIS; using {crs.authid()}.")
+        elif srids:
+            self.messages.append(f"SRID 0 (undefined); using {crs.authid()}.")
+        if len(srids) > 1:
+            self.messages.append(
+                f"Sample has {len(srids)} SRIDs; all rows were written as {crs.authid()}."
+            )
+        return crs
+
     def run(self):
-        schema, table, column, data_type = self.source
+        src = self.source
         where = self.options.get("where")
         limit = self.options.get("limit") or None
-        geom_expr = sql.geometry_expression(column, data_type)
         sink = None
         try:
+            if src["kind"] == "table":
+                from_clause = sql.table_ref(src["schema"], src["table"])
+            else:
+                from_clause = sql.query_from(src["sql"])
+            geom_expr = (
+                sql.geometry_expression(src["column"], src["data_type"]) if src["column"] else None
+            )
             with closing(db.connect(self.params)) as conn, conn.cursor() as cur:
-                cur.execute(sql.LIST_COLUMNS, (schema, table))
-                selects, kinds, names = [], [], []
-                for name, col_type in cur.fetchall():
-                    if name == column:
-                        continue
-                    attr = sql.attribute_column(name, col_type)
-                    if attr is None:
-                        self.messages.append(f"Skipped column {name} ({col_type}).")
-                        continue
-                    selects.append(attr[0])
-                    kinds.append(attr[1])
-                    names.append(name)
-                fields = QgsFields()
-                for name, kind in zip(sql.unique_names(names), kinds):
-                    fields.append(QgsField(name, FIELD_TYPES[kind]))
+                selects, kinds, fields = self._attributes(cur)
+                if geom_expr:
+                    crs = self._crs(cur, from_clause, geom_expr, where)
+                else:
+                    crs = QgsCoordinateReferenceSystem()
 
-                cur.execute(sql.srid_query(schema, table, geom_expr, where))
-                srids = cur.fetchall()
-                crs = self.options["fallback_crs"]
-                if srids and srids[0][0]:
-                    found = QgsCoordinateReferenceSystem(f"EPSG:{srids[0][0]}")
-                    if found.isValid():
-                        crs = found
-                    else:
-                        self.messages.append(
-                            f"SRID {srids[0][0]} is unknown to QGIS; using {crs.authid()}."
-                        )
-                elif srids:
-                    self.messages.append(f"SRID 0 (undefined); using {crs.authid()}.")
-                if len(srids) > 1:
-                    self.messages.append(
-                        f"Sample has {len(srids)} SRIDs; all rows were written as {crs.authid()}."
-                    )
-
-                cur.execute(sql.count_query(schema, table, geom_expr, where))
+                cur.execute(sql.count_query(from_clause, geom_expr, where))
                 total = cur.fetchone()[0]
                 if limit:
                     total = min(total, int(limit))
 
-                sink = FeatureSink(self.options["path"], table, fields, kinds, crs)
+                sink = FeatureSink(
+                    self.options["path"], src["name"], fields, kinds, crs, geometry=bool(geom_expr)
+                )
                 cur.execute(
-                    sql.declare_cursor(
-                        sql.data_query(schema, table, selects, geom_expr, where, limit)
-                    )
+                    sql.declare_cursor(sql.data_query(from_clause, selects, geom_expr, where, limit))
                 )
                 done = 0
                 while True:
@@ -224,7 +267,10 @@ class LoadTask(QgsTask):
                     if not rows:
                         break
                     for row in rows:
-                        sink.add(row[:-1], row[-1])
+                        if geom_expr:
+                            sink.add(row[:-1], row[-1])
+                        else:
+                            sink.add(row)
                     done += len(rows)
                     if total:
                         self.setProgress(100.0 * done / total)
@@ -236,6 +282,49 @@ class LoadTask(QgsTask):
             if sink is not None:
                 self.results = sink.close()
                 self.invalid = sink.invalid
+
+    def finished(self, result):
+        self.on_finished(self, result)
+
+
+class QueryTask(QgsTask):
+    """Runs a small SELECT (a preview) off the main thread and keeps the
+    header and rows for the callback. cancel() also cancels the statement
+    on the server."""
+
+    def __init__(self, params, query, label, on_finished):
+        super().__init__(f"Redshift: {label}", compat.CAN_CANCEL)
+        self.params = params
+        self.query = query
+        self.on_finished = on_finished
+        self.headers = []
+        self.rows = []
+        self.error = None
+        self._conn = None
+
+    def run(self):
+        try:
+            self._conn = db.connect(self.params)
+            with closing(self._conn), self._conn.cursor() as cur:
+                cur.execute(self.query)
+                self.headers = [d[0] for d in cur.description or []]
+                self.rows = cur.fetchall()
+            return True
+        except Exception as e:
+            if not self.isCanceled():
+                self.error = e
+            return False
+        finally:
+            self._conn = None
+
+    def cancel(self):
+        conn = self._conn
+        if conn is not None:
+            try:
+                conn.cancel()
+            except Exception:  # noqa: BLE001 - best effort
+                pass
+        super().cancel()
 
     def finished(self, result):
         self.on_finished(self, result)

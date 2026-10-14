@@ -17,7 +17,7 @@ from qgis.core import (
     QgsWkbTypes,
 )
 
-from redshift_spatial import compat, db, loader
+from redshift_spatial import compat, db, loader, sources
 from redshift_spatial.controller import Controller
 
 from helpers import FakeRedshift, hex_wkb
@@ -183,7 +183,8 @@ COLUMNS = [
 ]
 
 
-def run_task(fake, source=("analytics", "parcels", "shape", "geometry"), **options):
+def run_task(fake, source=None, **options):
+    source = source or sources.table("analytics", "parcels", "shape", "geometry")
     original = db.connect
     db.connect = fake.connect
     try:
@@ -246,7 +247,7 @@ def test_task_without_rows_creates_nothing():
 def test_task_case_insensitive_duplicate_columns():
     cols = [("Area", "numeric(10,2)"), ("area", "numeric(10,2)"), ("g", "geometry")]
     fake = FakeRedshift(cols, [(Decimal("1.5"), Decimal("2.5"), hex_wkb("POINT(0 0)"))])
-    task, ok = run_task(fake, source=("public", "t", "g", "geometry"))
+    task, ok = run_task(fake, source=sources.table("public", "t", "g", "geometry"))
     assert ok, task.error
     f = next(open_layer(task.results[0]).getFeatures())
     assert f["Area"] == 1.5 and f["area_2"] == 2.5
@@ -255,7 +256,7 @@ def test_task_case_insensitive_duplicate_columns():
 def test_task_limit_and_geography():
     cols = [("id", "bigint"), ("g", "geography")]
     fake = FakeRedshift(cols, [(1, hex_wkb("POINT(1 1)"))], srids=[(4326, 1)])
-    task, ok = run_task(fake, source=("public", "pts", "g", "geography"), limit=5)
+    task, ok = run_task(fake, source=sources.table("public", "pts", "g", "geography"), limit=5)
     assert ok
     data = [q for q, _ in fake.queries if q.startswith("DECLARE")][0]
     assert 'ST_AsBinary(CAST("g" AS GEOMETRY))' in data and data.endswith("LIMIT 5")

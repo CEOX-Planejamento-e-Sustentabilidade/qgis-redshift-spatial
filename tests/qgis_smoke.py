@@ -18,7 +18,7 @@ from qgis.core import (
     QgsWkbTypes,
 )
 
-from redshift_spatial import compat, loader
+from redshift_spatial import compat, loader, sources
 from redshift_spatial.controller import Controller
 from redshift_spatial.dialog import ConnectionDialog, LoadLayerDialog, LoadOptionsDialog
 
@@ -108,7 +108,8 @@ def test_dialogs_build():
     ctl = Controller(None)
     LoadLayerDialog(ctl)
     ConnectionDialog(ctl)
-    LoadOptionsDialog(("analytics", "parcels", "shape", "geometry"))
+    LoadOptionsDialog(sources.table("analytics", "parcels", "shape", "geometry"))
+    LoadOptionsDialog(sources.table("analytics", "lookup"))
 
 
 def test_icon_renders():
@@ -142,17 +143,16 @@ def test_browser_tree():
         connections.names = original
     assert [c.name() for c in conns] == ["cluster"]
     assert conns[0].createChildren() == []
-    assert [a.text() for a in conns[0].actions(None)][0] == "Refresh"
+    assert [a.text() for a in conns[0].actions(None)][:2] == ["Execute SQL…", "Refresh"]
 
     rows = [("analytics", "parcels", "shape", "geometry"),
             ("analytics", "pts", "g1", "geometry"), ("analytics", "pts", "g2", "geography")]
     schema = browser.SchemaItem(conns[0], "analytics", rows, ctl)
     tables = schema.createChildren()
     assert [t.name() for t in tables] == ["parcels", "pts (g1)", "pts (g2)"]
-    assert tables[0].source == rows[0]
+    assert tables[0].source == sources.from_row(rows[0])
     assert tables[0].path() == "redshift_spatial:/cluster/analytics/parcels/shape"
-    assert tables[0].state() == Qgis.BrowserItemState.Populated
-    assert [a.text() for a in tables[0].actions(None)] == ["Add Layer", "Add Layer with Filter…"]
+    assert [a.text() for a in tables[0].actions(None)] == ["Add Layer", "Add Layer with Filter…", "Preview Rows…"]
 
 
 def test_plugin_registers_and_unregisters_browser_provider():

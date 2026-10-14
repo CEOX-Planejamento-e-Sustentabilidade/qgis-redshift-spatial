@@ -10,6 +10,7 @@ QGIS 3.28 on.
 from qgis.core import Qgis, QgsTask, QgsVectorFileWriter, QgsWkbTypes
 from qgis.gui import QgsFileWidget
 from qgis.PyQt.QtCore import QMetaType, Qt, QVariant
+from qgis.PyQt.QtGui import QFontDatabase
 from qgis.PyQt.QtWidgets import QDialogButtonBox, QLineEdit, QMessageBox
 
 try:  # Qt5 keeps QAction in QtWidgets, Qt6 moved it to QtGui
@@ -38,6 +39,8 @@ CLOSE = _enum(QDialogButtonBox, "StandardButton", "Close")
 ACCEPT_ROLE = _enum(QDialogButtonBox, "ButtonRole", "AcceptRole")
 ACTION_ROLE = _enum(QDialogButtonBox, "ButtonRole", "ActionRole")
 PASSWORD = _enum(QLineEdit, "EchoMode", "Password")
+VERTICAL = _enum(Qt, "Orientation", "Vertical")
+FIXED_FONT = _enum(QFontDatabase, "SystemFont", "FixedFont")
 
 # QGIS
 SAVE_FILE = _enum(QgsFileWidget, "StorageMode", "SaveFile")
@@ -53,6 +56,7 @@ _WKB = getattr(Qgis, "WkbType", QgsWkbTypes)
 GEOMETRY_COLLECTION = _WKB.GeometryCollection
 MULTI_POLYGON = _WKB.MultiPolygon
 MULTI_LINE_STRING = _WKB.MultiLineString
+NO_GEOMETRY = _WKB.NoGeometry
 if hasattr(Qgis, "GeometryType"):
     POINT_GEOMETRY = Qgis.GeometryType.Point
     LINE_GEOMETRY = Qgis.GeometryType.Line

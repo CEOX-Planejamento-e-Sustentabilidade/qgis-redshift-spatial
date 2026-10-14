@@ -12,14 +12,32 @@ CURSOR_NAME = "qgis_redshift_spatial"
 SPATIAL_TYPES = ("geometry", "geography")
 SRID_SAMPLE = 10000
 
+PREVIEW_ROWS = 100
+SQL_PREVIEW_ROWS = 200
+
+# Leader-node catalogs and temporary schemas are not user data.
+_USER_SCHEMAS = (
+    "table_schema NOT IN ('information_schema', 'catalog_history') "
+    "AND LEFT(table_schema, 3) <> 'pg_'"
+)
+
 # SVV_COLUMNS also covers late-binding views (WITH NO SCHEMA BINDING), whose
 # columns are missing from pg_attribute / information_schema.
-LIST_SPATIAL_COLUMNS = """
+LIST_SPATIAL_COLUMNS = f"""
 SELECT table_schema, table_name, column_name, LOWER(data_type)
 FROM svv_columns
 WHERE LOWER(data_type) IN ('geometry', 'geography')
-  AND table_schema NOT IN ('pg_catalog', 'information_schema')
+  AND {_USER_SCHEMAS}
 ORDER BY 1, 2, 3
+"""
+
+LIST_PLAIN_TABLES = f"""
+SELECT table_schema, table_name
+FROM svv_columns
+WHERE {_USER_SCHEMAS}
+GROUP BY 1, 2
+HAVING SUM(CASE WHEN LOWER(data_type) IN ('geometry', 'geography') THEN 1 ELSE 0 END) = 0
+ORDER BY 1, 2
 """
 
 LIST_COLUMNS = """
@@ -28,6 +46,24 @@ FROM svv_columns
 WHERE table_schema = %s AND table_name = %s
 ORDER BY ordinal_position
 """
+
+# PostgreSQL type OIDs that Redshift reports in cursor.description. Anything
+# else (GEOMETRY, SUPER, VARBYTE...) reaches psycopg2 as text.
+_OID_KINDS = {
+    16: "bool",
+    20: "int64",
+    21: "int",
+    23: "int",
+    25: "string",
+    700: "double",
+    701: "double",
+    1042: "string",
+    1043: "string",
+    1082: "date",
+    1114: "datetime",
+    1184: "datetime",
+    1700: "double",
+}
 
 _KINDS = {
     "character varying": "string",
@@ -100,32 +136,73 @@ def geometry_expression(column, data_type):
     return col
 
 
+def kind_for_oid(oid):
+    return _OID_KINDS.get(oid, "string")
+
+
+def clean_query(text):
+    """User SQL without the trailing semicolon. It is always wrapped as a
+    subquery, so only a SELECT (or WITH ... SELECT) can run."""
+    query = (text or "").strip().rstrip(";").strip()
+    if not query:
+        raise ValueError("The query is empty.")
+    return query
+
+
+def query_from(text):
+    return f"({clean_query(text)}) AS q"
+
+
+def describe_query(text):
+    return f"SELECT * FROM {query_from(text)} LIMIT 0"
+
+
+def preview_query(from_clause, limit=PREVIEW_ROWS):
+    return f"SELECT * FROM {from_clause} LIMIT {int(limit)}"
+
+
 def _where(geom_expr, where):
-    sql = f"{geom_expr} IS NOT NULL"
+    """' WHERE ...' or ''."""
+    parts = []
+    if geom_expr:
+        parts.append(f"{geom_expr} IS NOT NULL")
     if where and where.strip():
-        sql += f" AND ({where.strip()})"
-    return sql
+        parts.append(f"({where.strip()})")
+    return " WHERE " + " AND ".join(parts) if parts else ""
 
 
-def srid_query(schema, table, geom_expr, where=None, sample=SRID_SAMPLE):
+def srid_query(from_clause, geom_expr, where=None, sample=SRID_SAMPLE):
     return (
         "SELECT ST_SRID(g), COUNT(*) FROM ("
-        f"SELECT {geom_expr} AS g FROM {table_ref(schema, table)} "
-        f"WHERE {_where(geom_expr, where)} LIMIT {int(sample)}"
+        f"SELECT {geom_expr} AS g FROM {from_clause}{_where(geom_expr, where)} LIMIT {int(sample)}"
         ") s GROUP BY 1 ORDER BY 2 DESC"
     )
 
 
-def count_query(schema, table, geom_expr, where=None):
-    return f"SELECT COUNT(*) FROM {table_ref(schema, table)} WHERE {_where(geom_expr, where)}"
+def count_query(from_clause, geom_expr=None, where=None):
+    return f"SELECT COUNT(*) FROM {from_clause}{_where(geom_expr, where)}"
 
 
-def data_query(schema, table, select_exprs, geom_expr, where=None, limit=None):
-    cols = ", ".join(list(select_exprs) + [f"ST_AsBinary({geom_expr})"])
-    sql = f"SELECT {cols} FROM {table_ref(schema, table)} WHERE {_where(geom_expr, where)}"
+def data_query(from_clause, select_exprs, geom_expr=None, where=None, limit=None):
+    """Attributes, then ST_AsBinary(geometry) last when there is a geometry."""
+    cols = list(select_exprs)
+    if geom_expr:
+        cols.append(f"ST_AsBinary({geom_expr})")
+    sql = f"SELECT {', '.join(cols) or '1'} FROM {from_clause}{_where(geom_expr, where)}"
     if limit:
         sql += f" LIMIT {int(limit)}"
     return sql
+
+
+def looks_like_wkb(value):
+    """Display helper: GEOMETRY and VARBYTE arrive as long hex strings."""
+    return (
+        isinstance(value, str)
+        and len(value) >= 18
+        and len(value) % 2 == 0
+        and value[:2] in ("00", "01")
+        and all(c in "0123456789abcdefABCDEF" for c in value[:64])
+    )
 
 
 def declare_cursor(query):

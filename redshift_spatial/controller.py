@@ -11,8 +11,8 @@ from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QInputDialog, QMessageBox
 
-from . import compat, connections
-from .loader import LoadTask
+from . import compat, connections, sources
+from .loader import LoadTask, QueryTask
 
 LOG_TAG = "Redshift Spatial"
 FAMILIES = ("point", "line", "polygon", "collection")
@@ -83,7 +83,7 @@ class Controller:
         options = dict(options)
         path = (options.get("path") or "").strip()
         if not path:
-            path = os.path.join(tempfile.mkdtemp(prefix="redshift_spatial_"), f"{source[1]}.gpkg")
+            path = os.path.join(tempfile.mkdtemp(prefix="redshift_spatial_"), f"{source['name']}.gpkg")
         else:
             if not path.lower().endswith(".gpkg"):
                 path += ".gpkg"
@@ -94,7 +94,24 @@ class Controller:
         task = LoadTask(params, source, options, self.task_finished)
         self.tasks.append(task)
         QgsApplication.taskManager().addTask(task)
-        self.message(tr("Loading {}.{}…").format(source[0], source[1]), compat.INFO)
+        self.message(tr("Loading {}…").format(sources.label(source)), compat.INFO)
+
+    def run_query(self, conn, query, label, on_done, parent=None):
+        """Run a small SELECT in the background; on_done(task, ok) gets the
+        headers and rows. Returns the task (to cancel it) or None."""
+        params = self.params(conn, parent or self.parent_window())
+        if params is None:
+            return None
+
+        def done(task, ok):
+            if task in self.tasks:
+                self.tasks.remove(task)
+            on_done(task, ok)
+
+        task = QueryTask(params, query, label, done)
+        self.tasks.append(task)
+        QgsApplication.taskManager().addTask(task)
+        return task
 
     def release_output(self, path, parent=None):
         """Make room for the output files. On Windows a GeoPackage still open
@@ -145,27 +162,27 @@ class Controller:
             QgsMessageLog.logMessage(
                 f"{task.invalid} rows with invalid geometry were skipped.", LOG_TAG, compat.WARNING
             )
-        schema, table = task.source[0], task.source[1]
+        label, base = task.label, task.source["name"]
         if not ok:
             if task.error is not None:
                 QgsMessageLog.logMessage(str(task.error), LOG_TAG, compat.CRITICAL)
-                self.message(tr("{}.{}: {}").format(schema, table, task.error), compat.CRITICAL)
+                self.message(tr("{}: {}").format(label, task.error), compat.CRITICAL)
             else:
-                self.message(tr("{}.{}: canceled.").format(schema, table), compat.WARNING)
+                self.message(tr("{}: canceled.").format(label), compat.WARNING)
             return
         if not task.results:
-            self.message(tr("{}.{}: no rows with geometry.").format(schema, table), compat.WARNING)
+            self.message(tr("{}: no rows.").format(label), compat.WARNING)
             return
         many = len(task.results) > 1
         for fam, path, layer_name, count in task.results:
-            name = f"{table} ({fam})" if many else table
+            name = f"{base} ({fam})" if many else base
             layer = QgsVectorLayer(f"{path}|layername={layer_name}", name, "ogr")
             if layer.isValid():
                 QgsProject.instance().addMapLayer(layer)
             QgsMessageLog.logMessage(f"{name}: {count} features in {path}", LOG_TAG, compat.INFO)
         total = sum(r[3] for r in task.results)
         level = compat.WARNING if task.messages or task.invalid else compat.SUCCESS
-        self.message(tr("{}.{}: {} features loaded.").format(schema, table, total), level)
+        self.message(tr("{}: {} rows loaded.").format(label, total), level)
 
     def message(self, text, level):
         if self.iface is not None:
