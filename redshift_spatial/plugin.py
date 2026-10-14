@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 CEOX Planejamento e Otimização
 from qgis.core import QgsApplication
-from qgis.PyQt.QtWidgets import QAction
 
 from .browser import RedshiftSpatialItemProvider
+from .compat import QAction
 from .controller import Controller, icon, tr
 
 

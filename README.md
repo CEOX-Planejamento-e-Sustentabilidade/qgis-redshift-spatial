@@ -74,7 +74,7 @@ un_qgis.py
 `tests/helpers.py` has a fake Redshift that answers the plugin's queries, so
 the whole load (columns, SRID, cursor batches, errors, cancel) runs without a
 cluster. CI runs both suites on QGIS 3.28 (minimum), 3.40 (LTR), 3.44 and
-`latest`.
+`latest` (QGIS 4, Qt6). Qt5/Qt6 differences live in `redshift_spatial/compat.py`.
 
 Before a release, check by hand against a real cluster: connect, list tables,
 load with and without a filter, cancel a load, reload into the same file.

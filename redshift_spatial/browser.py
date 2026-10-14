@@ -17,9 +17,9 @@ from qgis.core import (
     QgsDataProvider,
     QgsErrorItem,
 )
-from qgis.PyQt.QtWidgets import QAction
 
 from . import connections, db
+from .compat import QAction
 from .controller import icon, tr
 from .dialog import LoadOptionsDialog, WaitCursor, edit_connection, new_connection, remove_connection
 
@@ -163,5 +163,5 @@ class TableItem(QgsDataItem):
 
     def add_layer_with_filter(self):
         dlg = LoadOptionsDialog(self.source, self.controller.parent_window())
-        if dlg.exec_():
+        if dlg.exec():
             self.controller.load(self.connection(), self.source, dlg.form.options())

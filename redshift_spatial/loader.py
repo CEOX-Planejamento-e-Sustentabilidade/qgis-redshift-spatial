@@ -7,9 +7,8 @@ from contextlib import closing
 from datetime import timezone
 
 from qgis.core import (
-    Qgis,
-    QgsCoordinateReferenceSystem,
     QgsCoordinateTransformContext,
+    QgsCoordinateReferenceSystem,
     QgsFeature,
     QgsField,
     QgsFields,
@@ -18,31 +17,11 @@ from qgis.core import (
     QgsVectorFileWriter,
     QgsWkbTypes,
 )
-from qgis.PyQt.QtCore import QDate, QDateTime, QMetaType, Qt, QTime, QVariant
+from qgis.PyQt.QtCore import QDate, QDateTime, QTime
 
-from . import db, sql
+from . import compat, db, sql
 
-# QGIS 3.38 deprecated QgsField(name, QVariant.Type) in favour of QMetaType.
-if Qgis.QGIS_VERSION_INT >= 33800:
-    FIELD_TYPES = {
-        "string": QMetaType.QString,
-        "int": QMetaType.Int,
-        "int64": QMetaType.LongLong,
-        "double": QMetaType.Double,
-        "bool": QMetaType.Bool,
-        "date": QMetaType.QDate,
-        "datetime": QMetaType.QDateTime,
-    }
-else:
-    FIELD_TYPES = {
-        "string": QVariant.String,
-        "int": QVariant.Int,
-        "int64": QVariant.LongLong,
-        "double": QVariant.Double,
-        "bool": QVariant.Bool,
-        "date": QVariant.Date,
-        "datetime": QVariant.DateTime,
-    }
+FIELD_TYPES = compat.FIELD_TYPES
 
 
 def convert(value, kind):
@@ -57,10 +36,10 @@ def convert(value, kind):
     if kind == "date":
         return QDate(value.year, value.month, value.day)
     if kind == "datetime":
-        spec = Qt.LocalTime
+        spec = compat.LOCAL_TIME
         if value.tzinfo is not None:
             value = value.astimezone(timezone.utc)
-            spec = Qt.UTC
+            spec = compat.UTC
         return QDateTime(
             QDate(value.year, value.month, value.day),
             QTime(value.hour, value.minute, value.second, value.microsecond // 1000),
@@ -70,12 +49,12 @@ def convert(value, kind):
 
 
 def family(wkb_type):
-    if QgsWkbTypes.flatType(wkb_type) == QgsWkbTypes.GeometryCollection:
+    if QgsWkbTypes.flatType(wkb_type) == compat.GEOMETRY_COLLECTION:
         return "collection"
     return {
-        QgsWkbTypes.PointGeometry: "point",
-        QgsWkbTypes.LineGeometry: "line",
-        QgsWkbTypes.PolygonGeometry: "polygon",
+        compat.POINT_GEOMETRY: "point",
+        compat.LINE_GEOMETRY: "line",
+        compat.POLYGON_GEOMETRY: "polygon",
     }.get(QgsWkbTypes.geometryType(wkb_type), "collection")
 
 
@@ -120,7 +99,7 @@ class FeatureSink:
         opts.driverName = "GPKG"
         opts.layerName = self.layer_name
         opts.fileEncoding = "UTF-8"
-        opts.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteFile
+        opts.actionOnExistingFile = compat.CREATE_OR_OVERWRITE_FILE
         opts.layerOptions = [
             f"FID={self.free_name('fid')}",
             f"GEOMETRY_NAME={self.free_name('geom')}",
@@ -128,7 +107,7 @@ class FeatureSink:
         writer = QgsVectorFileWriter.create(
             path, self.fields, wkb_type, self.crs, QgsCoordinateTransformContext(), opts
         )
-        if writer.hasError() != QgsVectorFileWriter.NoError:
+        if writer.hasError() != compat.NO_ERROR:
             raise RuntimeError(writer.errorMessage())
         self._writers[fam] = writer
         self._counts[fam] = 0
@@ -173,7 +152,7 @@ class LoadTask(QgsTask):
 
     def __init__(self, params, source, options, on_finished):
         schema, table, column, data_type = source
-        super().__init__(f"Redshift: {schema}.{table}", QgsTask.CanCancel)
+        super().__init__(f"Redshift: {schema}.{table}", compat.CAN_CANCEL)
         self.params = params
         self.source = source
         self.options = options  # where, limit, path, fallback_crs

@@ -17,7 +17,7 @@ from qgis.core import (
     QgsWkbTypes,
 )
 
-from redshift_spatial import db, loader
+from redshift_spatial import compat, db, loader
 from redshift_spatial.controller import Controller
 
 from helpers import FakeRedshift, hex_wkb
@@ -92,8 +92,8 @@ def test_every_family_gets_its_own_file():
         sink.add([1], hex_wkb(wkt))
     results = {r[0]: r for r in sink.close()}
     assert {fam: r[3] for fam, r in results.items()} == {"point": 2, "line": 2, "polygon": 1, "collection": 1}
-    assert QgsWkbTypes.flatType(open_layer(results["line"]).wkbType()) == QgsWkbTypes.MultiLineString
-    assert QgsWkbTypes.flatType(open_layer(results["collection"]).wkbType()) == QgsWkbTypes.GeometryCollection
+    assert QgsWkbTypes.flatType(open_layer(results["line"]).wkbType()) == compat.MULTI_LINE_STRING
+    assert QgsWkbTypes.flatType(open_layer(results["collection"]).wkbType()) == compat.GEOMETRY_COLLECTION
 
 
 def test_z_and_2d_mixed_in_one_family():

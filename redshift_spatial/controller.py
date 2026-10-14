@@ -6,12 +6,12 @@ starting loads and adding the finished layers to the project."""
 import os
 import tempfile
 
-from qgis.core import Qgis, QgsApplication, QgsMessageLog, QgsProject, QgsVectorLayer
+from qgis.core import QgsApplication, QgsMessageLog, QgsProject, QgsVectorLayer
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QInputDialog, QLineEdit, QMessageBox
+from qgis.PyQt.QtWidgets import QInputDialog, QMessageBox
 
-from . import connections
+from . import compat, connections
 from .loader import LoadTask
 
 LOG_TAG = "Redshift Spatial"
@@ -66,7 +66,7 @@ class Controller:
             password = self.passwords.get(key)
             if password is None:
                 password, ok = QInputDialog.getText(
-                    parent, title, tr("Password for {}:").format(username), QLineEdit.Password
+                    parent, title, tr("Password for {}:").format(username), compat.PASSWORD
                 )
                 if not ok:
                     return None
@@ -94,7 +94,7 @@ class Controller:
         task = LoadTask(params, source, options, self.task_finished)
         self.tasks.append(task)
         QgsApplication.taskManager().addTask(task)
-        self.message(tr("Loading {}.{}…").format(source[0], source[1]), Qgis.Info)
+        self.message(tr("Loading {}.{}…").format(source[0], source[1]), compat.INFO)
 
     def release_output(self, path, parent=None):
         """Make room for the output files. On Windows a GeoPackage still open
@@ -112,7 +112,7 @@ class Controller:
                 os.path.basename(path)
             ),
         )
-        if answer != QMessageBox.Yes:
+        if answer != compat.YES:
             return None
         project = QgsProject.instance()
         normalized = {os.path.normcase(os.path.abspath(p)) for p in existing}
@@ -132,7 +132,7 @@ class Controller:
                 tr("{} is still in use; writing to {}.").format(
                     os.path.basename(path), os.path.basename(free)
                 ),
-                Qgis.Warning,
+                compat.WARNING,
             )
             return free
 
@@ -140,21 +140,21 @@ class Controller:
         if task in self.tasks:
             self.tasks.remove(task)
         for msg in task.messages:
-            QgsMessageLog.logMessage(msg, LOG_TAG, Qgis.Warning)
+            QgsMessageLog.logMessage(msg, LOG_TAG, compat.WARNING)
         if task.invalid:
             QgsMessageLog.logMessage(
-                f"{task.invalid} rows with invalid geometry were skipped.", LOG_TAG, Qgis.Warning
+                f"{task.invalid} rows with invalid geometry were skipped.", LOG_TAG, compat.WARNING
             )
         schema, table = task.source[0], task.source[1]
         if not ok:
             if task.error is not None:
-                QgsMessageLog.logMessage(str(task.error), LOG_TAG, Qgis.Critical)
-                self.message(tr("{}.{}: {}").format(schema, table, task.error), Qgis.Critical)
+                QgsMessageLog.logMessage(str(task.error), LOG_TAG, compat.CRITICAL)
+                self.message(tr("{}.{}: {}").format(schema, table, task.error), compat.CRITICAL)
             else:
-                self.message(tr("{}.{}: canceled.").format(schema, table), Qgis.Warning)
+                self.message(tr("{}.{}: canceled.").format(schema, table), compat.WARNING)
             return
         if not task.results:
-            self.message(tr("{}.{}: no rows with geometry.").format(schema, table), Qgis.Warning)
+            self.message(tr("{}.{}: no rows with geometry.").format(schema, table), compat.WARNING)
             return
         many = len(task.results) > 1
         for fam, path, layer_name, count in task.results:
@@ -162,9 +162,9 @@ class Controller:
             layer = QgsVectorLayer(f"{path}|layername={layer_name}", name, "ogr")
             if layer.isValid():
                 QgsProject.instance().addMapLayer(layer)
-            QgsMessageLog.logMessage(f"{name}: {count} features in {path}", LOG_TAG, Qgis.Info)
+            QgsMessageLog.logMessage(f"{name}: {count} features in {path}", LOG_TAG, compat.INFO)
         total = sum(r[3] for r in task.results)
-        level = Qgis.Warning if task.messages or task.invalid else Qgis.Success
+        level = compat.WARNING if task.messages or task.invalid else compat.SUCCESS
         self.message(tr("{}.{}: {} features loaded.").format(schema, table, total), level)
 
     def message(self, text, level):

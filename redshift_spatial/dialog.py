@@ -4,7 +4,7 @@
 
 from qgis.core import QgsCoordinateReferenceSystem
 from qgis.gui import QgsAuthConfigSelect, QgsFileWidget, QgsProjectionSelectionWidget
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QCursor
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QComboBox,
@@ -23,7 +23,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from . import connections, db
+from . import compat, connections, db
 from .controller import icon, tr
 
 SSL_MODES = ["require", "verify-ca", "verify-full", "prefer", "allow", "disable"]
@@ -31,7 +31,7 @@ SSL_MODES = ["require", "verify-ca", "verify-full", "prefer", "allow", "disable"
 
 class WaitCursor:
     def __enter__(self):
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.setOverrideCursor(QCursor(compat.WAIT_CURSOR))
 
     def __exit__(self, *exc):
         QApplication.restoreOverrideCursor()
@@ -72,8 +72,8 @@ class ConnectionDialog(QDialog):
 
         test = QPushButton(tr("Test Connection"))
         test.clicked.connect(self.test)
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.addButton(test, QDialogButtonBox.ActionRole)
+        buttons = QDialogButtonBox(compat.SAVE | compat.CANCEL)
+        buttons.addButton(test, compat.ACTION_ROLE)
         buttons.accepted.connect(self.save)
         buttons.rejected.connect(self.reject)
 
@@ -124,17 +124,17 @@ class ConnectionDialog(QDialog):
 def new_connection(controller, parent=None):
     """Returns the saved name, or None."""
     dlg = ConnectionDialog(controller, parent)
-    return dlg.data()["name"] if dlg.exec_() else None
+    return dlg.data()["name"] if dlg.exec() else None
 
 
 def edit_connection(controller, name, parent=None):
     dlg = ConnectionDialog(controller, parent, connections.load(name))
-    return dlg.data()["name"] if dlg.exec_() else None
+    return dlg.data()["name"] if dlg.exec() else None
 
 
 def remove_connection(name, parent=None):
     answer = QMessageBox.question(parent, tr("Remove"), tr("Remove connection {}?").format(name))
-    if answer == QMessageBox.Yes:
+    if answer == compat.YES:
         connections.remove(name)
         return True
     return False
@@ -153,7 +153,7 @@ class OptionsForm(QWidget):
         self.crs = QgsProjectionSelectionWidget()
         self.crs.setCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
         self.output = QgsFileWidget()
-        self.output.setStorageMode(QgsFileWidget.SaveFile)
+        self.output.setStorageMode(compat.SAVE_FILE)
         self.output.setFilter("GeoPackage (*.gpkg)")
         self.output.lineEdit().setPlaceholderText(tr("temporary file"))
 
@@ -182,8 +182,8 @@ class LoadOptionsDialog(QDialog):
         self.setWindowTitle(tr("Add {}.{}").format(schema, table))
         self.setWindowIcon(icon())
         self.form = OptionsForm()
-        buttons = QDialogButtonBox(QDialogButtonBox.Cancel)
-        buttons.addButton(tr("Add Layer"), QDialogButtonBox.AcceptRole)
+        buttons = QDialogButtonBox(compat.CANCEL)
+        buttons.addButton(tr("Add Layer"), compat.ACCEPT_ROLE)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
@@ -224,8 +224,8 @@ class LoadLayerDialog(QDialog):
 
         self.form = OptionsForm()
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
-        btn_load = buttons.addButton(tr("Add Layer"), QDialogButtonBox.AcceptRole)
+        buttons = QDialogButtonBox(compat.CLOSE)
+        btn_load = buttons.addButton(tr("Add Layer"), compat.ACCEPT_ROLE)
         btn_load.clicked.connect(lambda: self.load(self.tree.currentItem()))
         buttons.rejected.connect(self.reject)
 
@@ -290,7 +290,7 @@ class LoadLayerDialog(QDialog):
             if parent is None:
                 parent = schemas[schema] = QTreeWidgetItem(self.tree, [schema])
             item = QTreeWidgetItem(parent, [table, column, data_type])
-            item.setData(0, Qt.UserRole, (schema, table, column, data_type))
+            item.setData(0, compat.USER_ROLE, (schema, table, column, data_type))
         self.tree.expandAll()
         self.tree.resizeColumnToContents(0)
         if not rows:
@@ -312,7 +312,7 @@ class LoadLayerDialog(QDialog):
             parent.setHidden(visible == 0)
 
     def load(self, item):
-        source = item.data(0, Qt.UserRole) if item else None
+        source = item.data(0, compat.USER_ROLE) if item else None
         if not source:
             QMessageBox.information(self, tr("Choose a table"), tr("Select a table in the list."))
             return

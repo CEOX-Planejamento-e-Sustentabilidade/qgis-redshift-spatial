@@ -17,9 +17,8 @@ from qgis.core import (
     QgsVectorLayer,
     QgsWkbTypes,
 )
-from qgis.PyQt.QtCore import QVariant
 
-from redshift_spatial import loader
+from redshift_spatial import compat, loader
 from redshift_spatial.controller import Controller
 from redshift_spatial.dialog import ConnectionDialog, LoadLayerDialog, LoadOptionsDialog
 
@@ -45,7 +44,7 @@ def test_sink_splits_families_and_promotes_to_multi():
     assert [(r[0], r[3]) for r in results] == [("polygon", 2), ("point", 1)]
     poly = QgsVectorLayer(f"{results[0][1]}|layername=parcels", "p", "ogr")
     assert poly.isValid() and poly.featureCount() == 2
-    assert QgsWkbTypes.flatType(poly.wkbType()) == QgsWkbTypes.MultiPolygon
+    assert QgsWkbTypes.flatType(poly.wkbType()) == compat.MULTI_POLYGON
     assert poly.crs().authid() == "EPSG:4326"
     f = next(poly.getFeatures())
     assert f["area"] == 12.5 and f["d"].toString("yyyy-MM-dd") == "2026-08-20"
@@ -87,7 +86,7 @@ def test_existing_output_is_released_or_renamed():
     QgsProject.instance().addMapLayer(layer)
 
     original = QMessageBox.question
-    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
+    QMessageBox.question = staticmethod(lambda *a, **k: compat.YES)
     try:
         target = Controller(None).release_output(path)
     finally:
@@ -97,7 +96,7 @@ def test_existing_output_is_released_or_renamed():
     assert target == path and not os.path.exists(path) or target == controller.free_path(path)
     print(f"     released -> {os.path.basename(target)}")
 
-    QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.No)
+    QMessageBox.question = staticmethod(lambda *a, **k: compat.NO)
     try:
         open(path, "w").close()
         assert Controller(None).release_output(path) is None
@@ -124,7 +123,7 @@ def test_icon_renders():
 def test_browser_tree():
     """Root > connection > schema > table, without a database: the
     connection asks for credentials and gets a cancel."""
-    from qgis.core import QgsDataItem
+    from qgis.core import Qgis
 
     from redshift_spatial import browser, connections
 
@@ -152,7 +151,7 @@ def test_browser_tree():
     assert [t.name() for t in tables] == ["parcels", "pts (g1)", "pts (g2)"]
     assert tables[0].source == rows[0]
     assert tables[0].path() == "redshift_spatial:/cluster/analytics/parcels/shape"
-    assert tables[0].state() == QgsDataItem.Populated
+    assert tables[0].state() == Qgis.BrowserItemState.Populated
     assert [a.text() for a in tables[0].actions(None)] == ["Add Layer", "Add Layer with Filter…"]
 
 
@@ -175,4 +174,5 @@ def test_field_types_cover_sql_kinds():
     from redshift_spatial import sql
 
     assert set(sql._KINDS.values()) <= set(loader.FIELD_TYPES)
-    assert QgsField("x", loader.FIELD_TYPES["string"]).type() == QVariant.String
+    for kind, field_type in loader.FIELD_TYPES.items():
+        QgsField(kind, field_type)  # accepted by this QGIS/Qt without error
