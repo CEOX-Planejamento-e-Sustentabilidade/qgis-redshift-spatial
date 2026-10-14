@@ -4,6 +4,7 @@
 result of a SQL query. Plain dicts, so they travel to background tasks."""
 
 from . import sql
+from .i18n import tr
 
 NAME_FILTER_MAX = 60
 
@@ -56,7 +57,7 @@ def describe(origin):
         lines.append(f"WHERE {where}")
     if origin.get("limit"):
         lines.append(f"LIMIT {origin['limit']}")
-    lines.append(f"Redshift connection: {origin['connection']}")
+    lines.append(tr("Redshift connection: {}").format(origin["connection"]))
     return "\n".join(lines)
 
 

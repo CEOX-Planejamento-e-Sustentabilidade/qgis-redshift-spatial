@@ -24,13 +24,13 @@ from qgis.core import (
     QgsVectorLayer,
     QgsWkbTypes,
 )
-from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QInputDialog, QMessageBox
 from qgis.PyQt.QtXml import QDomDocument
 
 from . import compat, connections, sources, sql
 from .compat import QAction
+from .i18n import tr
 from .loader import FeatureSink, LoadTask, QueryTask
 
 LOG_TAG = "Redshift Spatial"
@@ -44,9 +44,6 @@ AUTO_NAME_PROPERTY = "redshift_spatial/auto_name"
 FAMILIES = ("point", "line", "polygon", "collection")
 ICON_PATH = os.path.join(os.path.dirname(__file__), "icon.svg")
 
-
-def tr(text):
-    return QCoreApplication.translate("RedshiftSpatial", text)
 
 
 def icon():

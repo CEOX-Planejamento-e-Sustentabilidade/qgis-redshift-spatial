@@ -6,11 +6,11 @@ column nodes of the Browser. Run through tests/run_qgis.py."""
 import os
 import tempfile
 
-from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsLayerTreeModel, QgsVectorLayer
+from qgis.core import Qgis, QgsApplication, QgsCoordinateReferenceSystem, QgsLayerTreeModel, QgsVectorLayer
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 
-from redshift_spatial import browser, compat, connections, db, dialog, loader, sources
+from redshift_spatial import browser, compat, connections, db, dialog, i18n, loader, sources
 from redshift_spatial.controller import Controller
 
 from helpers import FakeRedshift, hex_wkb
@@ -923,3 +923,24 @@ def test_edit_table_layer_reopens_its_options():
     finally:
         connections.names = connections_names
     QgsProject.instance().removeAllMapLayers()
+
+
+# language ---------------------------------------------------------------------------------
+
+
+def test_interface_in_portuguese_when_qgis_is():
+    try:
+        i18n.set_language(None)
+        assert i18n.language() == (QgsApplication.locale() or "en")[:2].lower()
+        i18n.set_language("pt")
+        assert dialog.ConnectionDialog(Controller(None)).windowTitle() == "Conexão Redshift Spatial"
+        assert dialog.SqlDialog(Controller(None), None).windowTitle() == "Redshift Spatial — SQL"
+        row = ("s", "t", "g", "geometry")
+        root = browser.RootItem(None, Controller(None))
+        item = browser.TableItem(browser.SchemaItem(root, "s", [row], None), row, None)
+        assert [a.text() for a in item.actions(None)] == [
+            "Adicionar Camada", "Adicionar Camada com Filtro…", "Pré-visualização…"]
+        origin = {"source": sources.table("s", "t", "g"), "where": "", "limit": 0, "connection": "c"}
+        assert sources.describe(origin) == "s.t\nConexão Redshift: c"
+    finally:
+        i18n.set_language("en")

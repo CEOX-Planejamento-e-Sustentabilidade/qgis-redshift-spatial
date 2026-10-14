@@ -57,6 +57,8 @@ GeoPackage that QGIS opens natively.
 - One layer per geometry family; single geometries are promoted to multi, so
   `POLYGON` and `MULTIPOLYGON` share a layer.
 - Read only: the plugin never writes to Redshift.
+- Interface in English or Portuguese (Brazil), following the language of
+  QGIS. Texts live in `redshift_spatial/i18n.py`.
 
 ## Install
 

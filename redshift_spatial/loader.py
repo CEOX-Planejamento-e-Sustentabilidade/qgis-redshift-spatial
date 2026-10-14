@@ -20,6 +20,7 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QDate, QDateTime, QTime
 
 from . import compat, db, sources, sql
+from .i18n import tr
 
 FIELD_TYPES = compat.FIELD_TYPES
 
@@ -188,7 +189,7 @@ class LoadTask(QgsTask):
                     continue
                 attr = sql.attribute_column(name, col_type)
                 if attr is None:
-                    self.messages.append(f"Skipped column {name} ({col_type}).")
+                    self.messages.append(tr("Skipped column {} ({}).").format(name, col_type))
                     continue
                 selects.append(attr[0])
                 kinds.append(attr[1])
@@ -218,12 +219,12 @@ class LoadTask(QgsTask):
             if found.isValid():
                 crs = found
             else:
-                self.messages.append(f"SRID {srids[0][0]} is unknown to QGIS; using {crs.authid()}.")
+                self.messages.append(tr("SRID {} is unknown to QGIS; using {}.").format(srids[0][0], crs.authid()))
         elif srids:
-            self.messages.append(f"SRID 0 (undefined); using {crs.authid()}.")
+            self.messages.append(tr("SRID 0 (undefined); using {}.").format(crs.authid()))
         if len(srids) > 1:
             self.messages.append(
-                f"Sample has {len(srids)} SRIDs; all rows were written as {crs.authid()}."
+                tr("Sample has {} SRIDs; all rows were written as {}.").format(len(srids), crs.authid())
             )
         return crs
 
