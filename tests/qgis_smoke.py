@@ -158,16 +158,31 @@ def test_browser_tree():
 def test_plugin_registers_and_unregisters_browser_provider():
     from redshift_spatial import classFactory
 
+    from qgis.core import QgsProject, QgsVectorLayer
+
+    from redshift_spatial.controller import ORIGIN_PROPERTY
+
+    calls = []
+
     class FakeIface:
         def __getattr__(self, name):
-            return lambda *a, **k: None
+            return lambda *a, **k: calls.append((name, a))
 
     registry = QgsApplication.dataItemProviderRegistry()
     plugin = classFactory(FakeIface())
     plugin.initGui()
     assert registry.provider("Redshift Spatial") is not None
+    ours = QgsVectorLayer("Point?crs=EPSG:4326", "ours", "memory")
+    ours.setCustomProperty(ORIGIN_PROPERTY, '{"source": {}, "connection": "c", "load_id": "x"}')
+    other = QgsVectorLayer("Point?crs=EPSG:4326", "other", "memory")
+    QgsProject.instance().addMapLayers([ours, other])
+    edited = [a[1] for name, a in calls if name == "addCustomActionForLayer"]
+    assert edited == [ours]  # "Edit Redshift Query..." only on layers it loaded
     plugin.unload()
     assert registry.provider("Redshift Spatial") is None
+    assert any(name == "removeCustomActionForLayerType" for name, a in calls)
+    QgsProject.instance().addMapLayer(QgsVectorLayer("Point?crs=EPSG:4326", "late", "memory"))
+    QgsProject.instance().removeAllMapLayers()
 
 
 def test_field_types_cover_sql_kinds():

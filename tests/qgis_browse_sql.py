@@ -7,6 +7,7 @@ import os
 import tempfile
 
 from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsVectorLayer
+from qgis.PyQt.QtGui import QColor
 
 from redshift_spatial import browser, compat, connections, db, dialog, loader, sources
 from redshift_spatial.controller import Controller
@@ -46,6 +47,7 @@ class SyncController(Controller):
         self.loads = []
         self.queries = []
         self.counts = []
+        self.replaced = []
 
     def params(self, conn, parent=None):
         return {}
@@ -65,8 +67,9 @@ class SyncController(Controller):
         on_done(task, ok)
         return task
 
-    def load(self, conn, source, options, parent=None):
+    def load(self, conn, source, options, parent=None, replace=None):
         self.loads.append((source, options))
+        self.replaced.append(replace)
 
 
 # loading -----------------------------------------------------------------------------
@@ -768,3 +771,148 @@ def test_load_options_count_what_will_be_loaded():
     assert ctl.counts[-1].endswith("(id < 5)")
     plain = dialog.LoadOptionsDialog(sources.table("s", "pts"))  # without controller: no count
     assert plain.count_label.text() == ""
+
+
+class LoadingController(Controller):
+    """Runs loads synchronously against a fake, through task_finished."""
+
+    def __init__(self, fake):
+        super().__init__(None)
+        self.fake = fake
+
+    def params(self, conn, parent=None):
+        return {}
+
+    def _start(self, task):
+        original = db.connect
+        db.connect = self.fake.connect
+        try:
+            ok = task.run()
+        finally:
+            db.connect = original
+        self.task_finished(task, ok)
+
+
+def test_loaded_layer_is_edited_and_replaced_in_place():
+    from qgis.core import QgsProject, QgsSingleSymbolRenderer, QgsSymbol
+
+    from redshift_spatial import controller as controller_module
+
+    rows = [(1, "a", hex_wkb("POINT(0 0)")), (2, "b", hex_wkb("POINT(1 1)"))]
+    fake = FakeRedshift([], rows, description=[("id", 23), ("name", 1043), ("geom", 3000)])
+    ctl = LoadingController(fake)
+    project = QgsProject.instance()
+    root = project.layerTreeRoot()
+    group = root.addGroup("work")
+    other = QgsVectorLayer("Point?crs=EPSG:4326", "other", "memory")
+    project.addMapLayer(other, False)
+    group.addLayer(other)
+
+    options = {"where": "id > 0", "limit": 5, "path": "", "fallback_crs": QgsCoordinateReferenceSystem("EPSG:4674")}
+    ctl.load(CONN, sources.query("SELECT id, name, geom FROM s.municipios", "geom", "municipios"), options)
+    (first,) = project.mapLayersByName("municipios")
+    origin = controller_module.origin_of(first)
+    assert origin["connection"] == "cluster" and origin["source"]["sql"] == "SELECT id, name, geom FROM s.municipios"
+    assert (origin["where"], origin["limit"], origin["crs"]) == ("id > 0", 5, "EPSG:4674")
+
+    # the user moves it into a group, renames and restyles it
+    root.removeLayer(first)
+    project.addMapLayer(first, False)
+    group.insertLayer(0, first)
+    first.setName("my towns")
+    symbol = QgsSymbol.defaultSymbol(first.geometryType())
+    symbol.setColor(QColor("#123456"))
+    first.setRenderer(QgsSingleSymbolRenderer(symbol))
+
+    original = connections.names, connections.load
+    connections.names = lambda: ["cluster"]
+    connections.load = lambda name: dict(CONN, name=name)
+    try:
+        first_id = first.id()
+        dlg = ctl.edit_layer(first)
+        assert isinstance(dlg, dialog.SqlDialog)
+        assert dlg.editor.toPlainText() == "SELECT id, name, geom FROM s.municipios"
+        assert dlg.layer_name.text() == "municipios" and dlg.geometry.currentText() == "geom"
+        assert dlg.form.where.text() == "id > 0" and dlg.form.limit.value() == 5
+        assert dlg.form.crs.crs().authid() == "EPSG:4674"
+        assert dlg.replace_box.isChecked() and not dlg.replace_box.isHidden()
+
+        dlg.editor.setPlainText("SELECT id, name, geom FROM s.municipios WHERE name = 'b'")
+        dlg.load()
+        layers = [l for l in project.mapLayers().values() if controller_module.origin_of(l)]
+        (second,) = layers
+        assert project.mapLayer(first_id) is None and second.name() == "my towns"
+        assert second.renderer().symbol().color().name() == "#123456"
+        assert [c.layerId() for c in group.children()] == [second.id(), other.id()]
+        new_origin = controller_module.origin_of(second)
+        assert new_origin["load_id"] == origin["load_id"]
+        assert new_origin["source"]["sql"].endswith("WHERE name = 'b'")
+
+        # same window again: still replaces (the load id is kept)
+        dlg.load()
+        assert len([l for l in project.mapLayers().values() if controller_module.origin_of(l)]) == 1
+
+        # unchecked: a new layer next to it
+        dlg.replace_box.setChecked(False)
+        dlg.load()
+        assert len([l for l in project.mapLayers().values() if controller_module.origin_of(l)]) == 2
+        dlg.reject()
+
+        # a failed load keeps the layer
+        (kept,) = [l for l in project.mapLayers().values() if l.name() == "my towns"]
+        fake.fail_on, fake.error = "DECLARE", RuntimeError("boom")
+        kept_id = kept.id()
+        dlg = ctl.edit_layer(kept)
+        dlg.load()
+        assert project.mapLayer(kept_id) is not None
+        dlg.reject()
+    finally:
+        connections.names, connections.load = original
+        fake.fail_on = None
+        project.removeAllMapLayers()
+        root.removeChildNode(group)
+
+
+def test_edit_table_layer_reopens_its_options():
+    from qgis.core import QgsProject
+
+    from redshift_spatial import controller as controller_module
+
+    fake = FakeRedshift([("id", "integer"), ("shape", "geometry")], [(1, hex_wkb("POINT(1 1)"))])
+    ctl = LoadingController(fake)
+    source = sources.table("s", "towns", "shape")
+    options = {"where": "id = 1", "limit": 0, "path": "", "fallback_crs": QgsCoordinateReferenceSystem("EPSG:4326")}
+    ctl.load(CONN, source, options)
+    (layer,) = QgsProject.instance().mapLayersByName("towns")
+    load_id = controller_module.origin_of(layer)["load_id"]
+    layer_id = layer.id()
+
+    original = connections.names, connections.load, dialog.LoadOptionsDialog.exec
+    connections.names = lambda: ["cluster"]
+    connections.load = lambda name: dict(CONN, name=name)
+    seen = {}
+
+    def accept(self):
+        seen["where"], seen["replace"] = self.form.where.text(), self.replace_box.isChecked()
+        self.form.where.setText("id = 2")
+        return True
+
+    dialog.LoadOptionsDialog.exec = accept
+    try:
+        ctl.edit_layer(layer)
+    finally:
+        connections.names, connections.load, dialog.LoadOptionsDialog.exec = original
+    assert seen == {"where": "id = 1", "replace": True}
+    (new,) = QgsProject.instance().mapLayersByName("towns")
+    assert new.id() != layer_id and controller_module.origin_of(new)["where"] == "id = 2"
+    assert controller_module.origin_of(new)["load_id"] == load_id
+
+    plain = QgsVectorLayer("Point?crs=EPSG:4326", "plain", "memory")
+    assert ctl.edit_layer(plain) is None  # not ours
+    connections_names = connections.names
+    connections.names = lambda: []
+    try:
+        assert ctl.edit_layer(new) is None  # connection removed
+    finally:
+        connections.names = connections_names
+    QgsProject.instance().removeAllMapLayers()

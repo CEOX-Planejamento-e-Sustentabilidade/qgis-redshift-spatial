@@ -30,8 +30,10 @@ class RedshiftSpatialPlugin:
         self.iface.addDatabaseToolBarIcon(add)
         self.provider = RedshiftSpatialItemProvider(self.controller)
         QgsApplication.dataItemProviderRegistry().addProvider(self.provider)
+        self.controller.install_layer_action()
 
     def unload(self):
+        self.controller.remove_layer_action()
         if self.provider is not None:
             QgsApplication.dataItemProviderRegistry().removeProvider(self.provider)
             self.provider = None

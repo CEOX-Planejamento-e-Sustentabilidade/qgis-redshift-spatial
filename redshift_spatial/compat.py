@@ -7,7 +7,7 @@ and QGIS 3.30+ moves several enums into Qgis.*. Every name below works from
 QGIS 3.28 on.
 """
 
-from qgis.core import Qgis, QgsTask, QgsVectorFileWriter, QgsWkbTypes
+from qgis.core import Qgis, QgsMapLayer, QgsTask, QgsVectorFileWriter, QgsWkbTypes
 from qgis.gui import QgsFileWidget
 from qgis.PyQt.QtCore import QMetaType, Qt, QVariant
 from qgis.PyQt.QtGui import QFontDatabase
@@ -92,3 +92,13 @@ else:
         "date": QVariant.Date,
         "datetime": QVariant.DateTime,
     }
+
+# Layer tree context menu and style copy
+try:  # Qgis.LayerType arrived in QGIS 3.30
+    VECTOR_LAYER = Qgis.LayerType.Vector
+except AttributeError:  # pragma: no cover - QGIS 3.28
+    from qgis.core import QgsMapLayerType
+
+    VECTOR_LAYER = QgsMapLayerType.VectorLayer
+STYLE_SYMBOLOGY = _enum(QgsMapLayer, "StyleCategory", "Symbology")
+STYLE_LABELING = _enum(QgsMapLayer, "StyleCategory", "Labeling")

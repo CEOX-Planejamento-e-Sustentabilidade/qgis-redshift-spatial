@@ -3,8 +3,10 @@
 """Shared by the dialog and the Browser panel: credentials for the session,
 starting loads and adding the finished layers to the project."""
 
+import json
 import os
 import tempfile
+import uuid
 
 from qgis.core import (
     QgsApplication,
@@ -15,6 +17,7 @@ from qgis.core import (
     QgsField,
     QgsFields,
     QgsGeometry,
+    QgsLayerTreeLayer,
     QgsMessageLog,
     QgsProject,
     QgsRectangle,
@@ -24,13 +27,18 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QInputDialog, QMessageBox
+from qgis.PyQt.QtXml import QDomDocument
 
 from . import compat, connections, sources, sql
+from .compat import QAction
 from .loader import FeatureSink, LoadTask, QueryTask
 
 LOG_TAG = "Redshift Spatial"
 # Marks the layers a load created, so a preview can filter them later.
 SOURCE_PROPERTY = "redshift_spatial/source"
+# How a layer was loaded (connection, source, filter, limit), so that it can
+# be edited and loaded again in place. JSON; saved with the project.
+ORIGIN_PROPERTY = "redshift_spatial/origin"
 FAMILIES = ("point", "line", "polygon", "collection")
 ICON_PATH = os.path.join(os.path.dirname(__file__), "icon.svg")
 
@@ -49,6 +57,15 @@ def output_files(path):
     return [path] + [f"{stem}_{fam}{ext}" for fam in FAMILIES]
 
 
+def origin_of(layer):
+    """The ORIGIN_PROPERTY of a layer as a dict, or None."""
+    try:
+        origin = json.loads(layer.customProperty(ORIGIN_PROPERTY) or "")
+    except (TypeError, ValueError):
+        return None
+    return origin if isinstance(origin, dict) and "source" in origin else None
+
+
 def free_path(path):
     stem, ext = os.path.splitext(path)
     n = 2
@@ -64,6 +81,7 @@ class Controller:
         self.passwords = {}  # session only, never written to disk
         self.record_layers = {}  # (label, geometry type, crs, headers) -> layer id
         self.previews = {}  # (connection, source label) -> PreviewDialog
+        self.edit_action = None
 
     def parent_window(self):
         return self.iface.mainWindow() if self.iface is not None else None
@@ -92,8 +110,10 @@ class Controller:
         return connections.params(conn, username, password)
 
     # loading ----------------------------------------------------------------
-    def load(self, conn, source, options, parent=None):
-        """options: where, limit, path ('' = temporary), fallback_crs."""
+    def load(self, conn, source, options, parent=None, replace=None):
+        """options: where, limit, path ('' = temporary), fallback_crs.
+        replace: the load id of layers this load replaces once it succeeds
+        (see edit_layer)."""
         parent = parent or self.parent_window()
         params = self.params(conn, parent)
         if params is None:
@@ -110,9 +130,22 @@ class Controller:
                 return
         options["path"] = path
         task = LoadTask(params, source, options, self.task_finished)
+        crs = options.get("fallback_crs")
+        task.origin = {
+            "connection": conn["name"],
+            "source": source,
+            "where": options.get("where") or "",
+            "limit": options.get("limit") or 0,
+            "crs": crs.authid() if crs is not None and crs.isValid() else "",
+            "load_id": replace or uuid.uuid4().hex,
+        }
+        task.replace = replace
+        self.message(tr("Loading {}…").format(sources.label(source)), compat.INFO)
+        self._start(task)
+
+    def _start(self, task):
         self.tasks.append(task)
         QgsApplication.taskManager().addTask(task)
-        self.message(tr("Loading {}…").format(sources.label(source)), compat.INFO)
 
     def run_query(self, conn, query, label, on_done, parent=None, count_query=None):
         """Run a small SELECT in the background; on_done(task, ok) gets the
@@ -195,16 +228,104 @@ class Controller:
             self.message(tr("{}: no rows.").format(label), compat.WARNING)
             return
         many = len(task.results) > 1
+        origin = getattr(task, "origin", None)
+        layers = []
         for fam, path, layer_name, count in task.results:
             name = f"{base} ({fam})" if many else base
             layer = QgsVectorLayer(f"{path}|layername={layer_name}", name, "ogr")
             if layer.isValid():
                 layer.setCustomProperty(SOURCE_PROPERTY, label)
-                QgsProject.instance().addMapLayer(layer)
+                if origin is not None:
+                    layer.setCustomProperty(ORIGIN_PROPERTY, json.dumps(origin))
+                layers.append(layer)
             QgsMessageLog.logMessage(f"{name}: {count} features in {path}", LOG_TAG, compat.INFO)
+        self._add_layers(layers, self.layers_of_load(getattr(task, "replace", None)))
         total = sum(r[3] for r in task.results)
         level = compat.WARNING if task.messages or task.invalid else compat.SUCCESS
         self.message(tr("{}: {} rows loaded.").format(label, total), level)
+
+    def _add_layers(self, layers, old):
+        """Add the new layers; when they replace old ones, put them where the
+        old ones were in the Layers panel, keep the name and the style the
+        user gave them (same geometry type), then remove the old ones."""
+        project = QgsProject.instance()
+        if not old:
+            for layer in layers:
+                project.addMapLayer(layer)
+            return
+        group, index = project.layerTreeRoot(), 0
+        node = group.findLayer(old[0].id())
+        if node is not None:
+            group = node.parent()
+            index = next(
+                i for i, child in enumerate(group.children())
+                if isinstance(child, QgsLayerTreeLayer) and child.layerId() == old[0].id()
+            )
+        by_type = {layer.geometryType(): layer for layer in old}
+        for offset, layer in enumerate(layers):
+            previous = by_type.get(layer.geometryType())
+            if previous is not None:
+                copy_style(previous, layer)
+                if len(old) == 1 and len(layers) == 1:
+                    layer.setName(previous.name())
+            project.addMapLayer(layer, False)
+            group.insertLayer(index + offset, layer)
+        project.removeMapLayers([layer.id() for layer in old])
+
+    def layers_of_load(self, load_id):
+        if not load_id:
+            return []
+        return [
+            layer for layer in QgsProject.instance().mapLayers().values()
+            if (origin_of(layer) or {}).get("load_id") == load_id
+        ]
+
+    # editing a loaded layer ---------------------------------------------------
+    def install_layer_action(self):
+        """"Edit Redshift Query…" in the Layers panel context menu of the
+        layers this plugin loaded (also those of a project opened later)."""
+        if self.iface is None:
+            return
+        self.edit_action = QAction(icon(), tr("Edit Redshift Query…"), self.iface.mainWindow())
+        self.edit_action.triggered.connect(self.edit_current_layer)
+        self.iface.addCustomActionForLayerType(self.edit_action, "", compat.VECTOR_LAYER, False)
+        QgsProject.instance().layersAdded.connect(self.register_layers)
+        self.register_layers(QgsProject.instance().mapLayers().values())
+
+    def remove_layer_action(self):
+        if self.edit_action is None:
+            return
+        try:
+            QgsProject.instance().layersAdded.disconnect(self.register_layers)
+        except TypeError:
+            pass
+        self.iface.removeCustomActionForLayerType(self.edit_action)
+        self.edit_action = None
+
+    def register_layers(self, layers):
+        for layer in layers:
+            if origin_of(layer) is not None:
+                self.iface.addCustomActionForLayer(self.edit_action, layer)
+
+    def edit_current_layer(self):
+        layer = self.iface.layerTreeView().currentLayer()
+        if layer is not None:
+            self.edit_layer(layer)
+
+    def edit_layer(self, layer, parent=None):
+        """Open the query (SQL window) or the load options (table) a layer
+        came from; loading again replaces the layer in place. Returns the
+        dialog, or None."""
+        origin = origin_of(layer)
+        if origin is None:
+            self.message(tr("{} was not loaded by Redshift Spatial.").format(layer.name()), compat.WARNING)
+            return None
+        if origin["connection"] not in connections.names():
+            self.message(tr("Connection {} no longer exists.").format(origin["connection"]), compat.WARNING)
+            return None
+        from .dialog import edit_origin  # the dialogs import this module
+
+        return edit_origin(self, origin, parent or self.parent_window())
 
     # records ----------------------------------------------------------------
     def show_record(self, label, headers, row, geometry_column):
@@ -403,3 +524,11 @@ class Controller:
     def message(self, text, level):
         if self.iface is not None:
             self.iface.messageBar().pushMessage(LOG_TAG, text, level=level, duration=8)
+
+
+def copy_style(source, target):
+    """Symbology and labels of one layer onto another."""
+    doc = QDomDocument()
+    categories = compat.STYLE_SYMBOLOGY | compat.STYLE_LABELING
+    source.exportNamedStyle(doc, categories=categories)
+    target.importNamedStyle(doc, categories=categories)

@@ -184,6 +184,14 @@ class OptionsForm(QWidget):
             form.addRow(tr("CRS when SRID is 0"), self.crs)
         form.addRow(tr("Save to"), self.output)
 
+    def set_options(self, origin):
+        """Filter, limit and CRS of an earlier load (controller.ORIGIN_PROPERTY)."""
+        self.where.setText(origin.get("where") or "")
+        self.limit.setValue(origin.get("limit") or 0)
+        crs = QgsCoordinateReferenceSystem(origin.get("crs") or "")
+        if crs.isValid():
+            self.crs.setCrs(crs)
+
     def options(self):
         return {
             "where": self.where.text(),
@@ -198,7 +206,7 @@ class LoadOptionsDialog(QDialog):
     With a controller and a connection it also counts the rows the load
     will bring, again whenever the filter or the limit changes."""
 
-    def __init__(self, source, parent=None, where="", controller=None, conn=None):
+    def __init__(self, source, parent=None, where="", controller=None, conn=None, replacing=False):
         super().__init__(parent)
         self.source = source
         self.controller = controller
@@ -214,6 +222,7 @@ class LoadOptionsDialog(QDialog):
         self.count_label.setWordWrap(True)
         self.form.where.editingFinished.connect(self.recount)
         self.form.limit.valueChanged.connect(self.show_count)
+        self.replace_box = replace_box(replacing)
         buttons = QDialogButtonBox(compat.CANCEL)
         buttons.addButton(tr("Add Layer"), compat.ACCEPT_ROLE)
         buttons.accepted.connect(self.accept)
@@ -223,6 +232,7 @@ class LoadOptionsDialog(QDialog):
         layout.addWidget(QLabel(sources.label(source) + detail))
         layout.addWidget(self.form)
         layout.addWidget(self.count_label)
+        layout.addWidget(self.replace_box)
         layout.addWidget(buttons)
         self.resize(520, self.sizeHint().height())
         self.counted_where = None
@@ -280,6 +290,32 @@ class LoadOptionsDialog(QDialog):
     def reject(self):
         cancel_task(self.task)
         super().reject()
+
+
+def replace_box(replacing):
+    """"Replace the current layer" check box, shown when editing a layer."""
+    box = QCheckBox(tr("Replace the current layer (same place in the Layers panel, same style)"))
+    box.setChecked(bool(replacing))
+    box.setVisible(bool(replacing))
+    return box
+
+
+def edit_origin(controller, origin, parent=None):
+    """Reopen what a layer was loaded from (see Controller.edit_layer)."""
+    source = origin["source"]
+    if source["kind"] == "query":
+        dlg = SqlDialog(controller, origin["connection"], parent, origin=origin)
+        dlg.show()
+        return dlg
+    conn = connections.load(origin["connection"])
+    dlg = LoadOptionsDialog(source, parent, where=origin.get("where") or "",
+                            controller=controller, conn=conn, replacing=True)
+    dlg.form.set_options(origin)
+    dlg.setWindowTitle(tr("Edit {}").format(sources.label(source)))
+    if dlg.exec():
+        replace = origin["load_id"] if dlg.replace_box.isChecked() else None
+        controller.load(conn, source, dlg.form.options(), parent, replace=replace)
+    return dlg
 
 
 # results ------------------------------------------------------------------------
@@ -667,11 +703,12 @@ class SqlDialog(QDialog):
 
     NO_GEOMETRY = tr("(no geometry)")
 
-    def __init__(self, controller, conn_name=None, parent=None):
+    def __init__(self, controller, conn_name=None, parent=None, origin=None):
         super().__init__(parent)
         self.controller = controller
         self.task = None
         self.total = None
+        self.origin = origin  # editing a loaded layer: what it was loaded from
         self.setWindowTitle(tr("Redshift Spatial — SQL"))
         self.setWindowIcon(icon())
         self.resize(960, 720)
@@ -706,6 +743,7 @@ class SqlDialog(QDialog):
         load = QPushButton(scope_label(0))
         load.clicked.connect(self.load)
         self.add_button = load
+        self.replace_box = replace_box(origin is not None)
 
         top = QHBoxLayout()
         top.addWidget(QLabel(tr("Connection")))
@@ -731,6 +769,7 @@ class SqlDialog(QDialog):
         bottom_layout.addLayout(map_row)
         bottom_layout.addLayout(load_form)
         bottom_layout.addWidget(self.form)
+        bottom_layout.addWidget(self.replace_box)
         bottom_layout.addWidget(load)
 
         splitter = QSplitter()
@@ -742,6 +781,15 @@ class SqlDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addLayout(top)
         layout.addWidget(splitter, 1)
+        if origin is not None:
+            source = origin["source"]
+            self.setWindowTitle(tr("Redshift Spatial — Edit {}").format(source["name"]))
+            self.editor.setPlainText(source["sql"])
+            self.layer_name.setText(source["name"])
+            if source["column"]:
+                self.geometry.addItem(source["column"])
+                self.geometry.setCurrentText(source["column"])
+            self.form.set_options(origin)
 
     def connection(self):
         name = self.conn_combo.currentText()
@@ -838,7 +886,9 @@ class SqlDialog(QDialog):
         if scope == SELECTED:
             self.controller.save_rows(name, self.table.headers, selected, column)
         elif scope == ALL:
-            self.controller.load(conn, sources.query(text, column, name), self.form.options(), self)
+            replace = self.origin["load_id"] if self.origin and self.replace_box.isChecked() else None
+            self.controller.load(conn, sources.query(text, column, name), self.form.options(), self,
+                                 replace=replace)
 
     def reject(self):
         self.cancel()
