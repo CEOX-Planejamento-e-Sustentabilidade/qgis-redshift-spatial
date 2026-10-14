@@ -32,7 +32,8 @@ GeoPackage that QGIS opens natively.
   and **double click on a row (or select several and click *Show Selected on
   Map*) to see them on the map** (a temporary
   "(records)" layer, the row selected and zoomed to; *Clear Records* empties
-  it). *Add Layer…* loads every row matching the preview's WHERE. The same
+  it). *Add Layer…* saves only the selected rows (no new query) or loads
+  every row matching the preview's WHERE; it asks when rows are selected. The same
   works in the SQL window.
 - **Tables without geometry** (optional, per connection: *Also list tables
   without geometry*) load as attribute tables, e.g. to join with a layer.

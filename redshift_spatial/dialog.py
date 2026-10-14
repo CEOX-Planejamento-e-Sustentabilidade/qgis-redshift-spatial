@@ -233,6 +233,30 @@ def failure_text(task):
     return tr("Query failed: {}").format(str(task.error).strip())
 
 
+SELECTED, ALL = "selected", "all"
+
+
+def ask_scope(parent, selected):
+    """Add Layer with rows selected: only those rows, or every row of the
+    query? Returns SELECTED, ALL or None (cancel)."""
+    box = QMessageBox(parent)
+    box.setWindowTitle(tr("Add Layer"))
+    box.setText(tr("{} row(s) are selected. What should the new layer contain?").format(selected))
+    only = box.addButton(tr("Only the {} selected").format(selected), compat.MB_ACCEPT_ROLE)
+    every = box.addButton(tr("All matching rows"), compat.MB_ACTION_ROLE)
+    box.addButton(compat.CANCEL_BUTTON)
+    box.setDefaultButton(only)
+    box.exec()
+    clicked = box.clickedButton()
+    return SELECTED if clicked is only else ALL if clicked is every else None
+
+
+def scope_label(count):
+    if count:
+        return tr("Add Layer ({} selected)…").format(count)
+    return tr("Add Layer (all matching)…")
+
+
 def cancel_task(task):
     """Cancel a running task. QGIS deletes the C++ side of a task once it
     finishes, so a finished one raises RuntimeError: nothing to cancel."""
@@ -388,6 +412,9 @@ class PreviewDialog(QDialog):
         self.status = QLabel()
         self.table = ResultsTable()
         self.table.itemDoubleClicked.connect(self.show_on_map)
+        self.table.itemSelectionChanged.connect(
+            lambda: self.add_button.setText(scope_label(len(self.table.selected_rows())))
+        )
         self.filter = FilterBar(self.table)
         hint = tr("Double-click a row to show it on the map, or select several rows and click "
                   "'Show Selected on Map'.") if source["column"] else ""
@@ -399,10 +426,14 @@ class PreviewDialog(QDialog):
             clear.setAutoDefault(False)
             clear.setToolTip(tr("Empty the temporary \"(records)\" layer of this table"))
             clear.clicked.connect(self.clear_records)
-        add = buttons.addButton(tr("Add Layer…"), compat.ACTION_ROLE)
+        add = buttons.addButton(scope_label(0), compat.ACTION_ROLE)
         add.setAutoDefault(False)
-        add.setToolTip(tr("Load every row that matches the WHERE above, not only the rows shown"))
+        add.setToolTip(tr("With rows selected: only those rows, or every row matching the WHERE"))
         add.clicked.connect(self.add_layer)
+        self.add_button = add
+        self.table.itemSelectionChanged.connect(
+            lambda: self.add_button.setText(scope_label(len(self.table.selected_rows())))
+        )
 
         layout = QVBoxLayout(self)
         layout.addLayout(top)
@@ -485,10 +516,18 @@ class PreviewDialog(QDialog):
         self.status.setText(tr("{} record(s) removed from the map.").format(removed))
 
     def add_layer(self):
-        """Load every row matching the current WHERE, with the usual options."""
-        dlg = LoadOptionsDialog(self.source, self, where=sql.clean_filter(self.where.text()))
-        if dlg.exec():
-            self.controller.load(self.conn, self.source, dlg.form.options(), self)
+        """Only the selected rows (saved from the preview), or every row
+        matching the current WHERE (loaded again, with the usual options)."""
+        selected = self.table.selected_rows()
+        scope = ask_scope(self, len(selected)) if selected else ALL
+        if scope == SELECTED:
+            self.controller.save_rows(
+                sources.label(self.source), self.table.headers, selected, self.source["column"]
+            )
+        elif scope == ALL:
+            dlg = LoadOptionsDialog(self.source, self, where=sql.clean_filter(self.where.text()))
+            if dlg.exec():
+                self.controller.load(self.conn, self.source, dlg.form.options(), self)
 
     def reject(self):
         cancel_task(self.task)
@@ -551,14 +590,18 @@ class SqlDialog(QDialog):
         self.status = QLabel(tr("Only SELECT queries; the first {} rows are shown.").format(sql.SQL_PREVIEW_ROWS))
         self.table = ResultsTable()
         self.table.itemDoubleClicked.connect(self.show_on_map)
+        self.table.itemSelectionChanged.connect(
+            lambda: self.add_button.setText(scope_label(len(self.table.selected_rows())))
+        )
         self.filter = FilterBar(self.table)
 
         self.geometry = QComboBox()
         self.geometry.addItem(self.NO_GEOMETRY)
         self.layer_name = QLineEdit("query")
         self.form = OptionsForm()
-        load = QPushButton(tr("Add Layer"))
+        load = QPushButton(scope_label(0))
         load.clicked.connect(self.load)
+        self.add_button = load
 
         top = QHBoxLayout()
         top.addWidget(QLabel(tr("Connection")))
@@ -684,7 +727,12 @@ class SqlDialog(QDialog):
         column = self.geometry.currentText()
         column = None if column == self.NO_GEOMETRY else column
         name = self.layer_name.text().strip() or "query"
-        self.controller.load(conn, sources.query(text, column, name), self.form.options(), self)
+        selected = self.table.selected_rows()
+        scope = ask_scope(self, len(selected)) if selected else ALL
+        if scope == SELECTED:
+            self.controller.save_rows(name, self.table.headers, selected, column)
+        elif scope == ALL:
+            self.controller.load(conn, sources.query(text, column, name), self.form.options(), self)
 
     def reject(self):
         self.cancel()

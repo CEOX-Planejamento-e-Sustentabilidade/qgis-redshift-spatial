@@ -213,3 +213,26 @@ def test_filter_accepts_a_typed_where_keyword():
     assert sql.clean_filter("WHERE") == ""
     assert sql.preview_query(T, 5, "WHERE id = 7") == 'SELECT * FROM "s"."t" WHERE (id = 7) LIMIT 5'
     assert sql.count_query(T, None, "where x > 1") == 'SELECT COUNT(*) FROM "s"."t" WHERE (x > 1)'
+
+
+def test_infer_kind_from_values():
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    assert sql.infer_kind([1, 2, None]) == "int64"
+    assert sql.infer_kind([1, 2.5]) == "double"
+    assert sql.infer_kind([Decimal("1.5"), 3]) == "double"
+    assert sql.infer_kind([True, None, False]) == "bool"
+    assert sql.infer_kind([True, 1]) == "string"  # mixed bool and int: keep as text
+    assert sql.infer_kind([date(2026, 1, 1)]) == "date"
+    assert sql.infer_kind([datetime(2026, 1, 1, 10)]) == "datetime"
+    assert sql.infer_kind([date(2026, 1, 1), datetime(2026, 1, 1)]) == "string"
+    assert sql.infer_kind(["a", 1]) == "string"
+    assert sql.infer_kind([None, None]) == "string"
+    assert sql.infer_kind([]) == "string"
+
+
+def test_safe_file_name():
+    assert sql.safe_file_name("gold.vw_car (selected)") == "gold_vw_car__selected"
+    assert sql.safe_file_name("ação/2026") == "ação_2026"
+    assert sql.safe_file_name("...") == "layer"

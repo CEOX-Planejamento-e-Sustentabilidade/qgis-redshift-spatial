@@ -609,3 +609,87 @@ def test_preview_add_layer_uses_the_current_where():
     dlg.clear_records()
     assert "record(s) removed" in dlg.status.text()
     dlg.reject()
+
+
+def test_save_selected_rows_keeps_types_and_geometry():
+    from datetime import date
+    from decimal import Decimal
+
+    from qgis.core import QgsProject
+
+    ctl = Controller(None)
+    headers = ["id", "area", "day", "name", "shape"]
+    rows = [(1, Decimal("2.5"), date(2026, 1, 2), "a", ewkb_hex("POLYGON((0 0,1 0,1 1,0 0))", 4674)),
+            (2, Decimal("3.5"), None, None, ewkb_hex("POLYGON((0 0,2 0,2 2,0 0))", 4674)),
+            (3, None, None, "no geometry", None)]
+    (layer,) = ctl.save_rows("s.parcels", headers, rows, "shape")
+    assert layer.name() == "s.parcels (selected)" and layer.featureCount() == 2
+    assert layer.crs().authid() == "EPSG:4674"
+    assert [f.name() for f in layer.fields()][-4:] == ["id", "area", "day", "name"]
+    f = sorted(layer.getFeatures(), key=lambda f: f["id"])[0]
+    assert f["id"] == 1 and f["area"] == 2.5 and f["day"].toString("yyyy-MM-dd") == "2026-01-02"
+    assert layer.source().endswith("layername=s_parcels__selected")
+    assert ctl.layers_for("s.parcels") == [layer]  # the preview's map filter reaches it too
+
+    (table,) = ctl.save_rows("s.lookup", ["code", "label"], [(1, "x"), (2, "y")])
+    assert table.featureCount() == 2 and table.wkbType() == compat.NO_GEOMETRY
+    QgsProject.instance().removeAllMapLayers()
+
+
+def test_add_layer_asks_when_rows_are_selected():
+    from qgis.core import QgsProject
+
+    rows = [(i, ewkb_hex(f"POINT({i} {i})", 4326)) for i in range(5)]
+    fake = FakeRedshift([("id", "integer"), ("shape", "geometry")], rows)
+    ctl = SyncController(fake)
+    dlg = dialog.open_preview(ctl, CONN, sources.table("s", "scope", "shape"))
+    assert dlg.add_button.text() == "Add Layer (all matching)…"
+    dlg.table.selectRow(1)
+    assert dlg.add_button.text() == "Add Layer (1 selected)…"
+
+    answers = []
+    original = dialog.ask_scope
+    dialog.ask_scope = lambda parent, n: answers.append(n) or dialog.SELECTED
+    try:
+        dlg.add_layer()
+        assert answers == [1]
+        (saved,) = QgsProject.instance().mapLayersByName("s.scope (selected)")
+        assert saved.featureCount() == 1 and next(saved.getFeatures())["id"] == 1
+        assert not ctl.loads  # nothing queried again
+
+        dialog.ask_scope = lambda parent, n: None  # cancel
+        dlg.add_layer()
+        assert not ctl.loads
+
+        dialog.ask_scope = lambda parent, n: dialog.ALL
+        accept = dialog.LoadOptionsDialog.exec
+        dialog.LoadOptionsDialog.exec = lambda self: True
+        try:
+            dlg.add_layer()
+        finally:
+            dialog.LoadOptionsDialog.exec = accept
+        assert ctl.loads and ctl.loads[-1][0] == sources.table("s", "scope", "shape")
+    finally:
+        dialog.ask_scope = original
+        dlg.reject()
+        QgsProject.instance().removeAllMapLayers()
+
+
+def test_ask_scope_dialog_builds_and_cancel_returns_none():
+    from qgis.PyQt.QtWidgets import QMessageBox
+
+    seen = {}
+    original = QMessageBox.exec
+
+    def fake_exec(box):
+        seen["buttons"] = [b.text() for b in box.buttons()]
+        return 0
+
+    QMessageBox.exec = fake_exec
+    try:
+        assert dialog.ask_scope(None, 3) is None  # closed without a choice
+    finally:
+        QMessageBox.exec = original
+    assert "Only the 3 selected" in seen["buttons"] and "All matching rows" in seen["buttons"]
+    assert dialog.scope_label(0) == "Add Layer (all matching)…"
+    assert dialog.scope_label(3) == "Add Layer (3 selected)…"

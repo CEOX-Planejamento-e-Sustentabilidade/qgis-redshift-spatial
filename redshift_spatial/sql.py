@@ -6,6 +6,8 @@ No QGIS imports here, so this module can be unit tested with plain pytest.
 """
 
 import struct
+from datetime import date, datetime
+from decimal import Decimal
 
 # Single-node clusters reject FETCH above 1000 rows; multi-node clusters
 # accept more, but 1000 works everywhere.
@@ -301,3 +303,28 @@ def _convert_geometry(data, pos, out, srid):
     else:
         raise ValueError(f"unsupported WKB type {base}")
     return pos
+
+
+def infer_kind(values):
+    """Field kind for a column known only by its values (rows already
+    fetched for a preview): the narrowest kind every non-NULL value fits."""
+    values = [v for v in values if v is not None]
+    if not values:
+        return "string"
+    if all(isinstance(v, bool) for v in values):
+        return "bool"
+    if all(isinstance(v, int) and not isinstance(v, bool) for v in values):
+        return "int64"
+    if all(isinstance(v, (int, float, Decimal)) and not isinstance(v, bool) for v in values):
+        return "double"
+    if all(isinstance(v, datetime) for v in values):
+        return "datetime"
+    if all(isinstance(v, date) and not isinstance(v, datetime) for v in values):
+        return "date"
+    return "string"
+
+
+def safe_file_name(name):
+    """A label such as "gold.vw_car (selected)" as a file name."""
+    cleaned = "".join(c if c.isalnum() or c in "-_" else "_" for c in name).strip("_")
+    return cleaned or "layer"

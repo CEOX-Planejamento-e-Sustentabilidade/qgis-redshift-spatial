@@ -13,6 +13,7 @@ from qgis.core import (
     QgsFeature,
     QgsFeatureRequest,
     QgsField,
+    QgsFields,
     QgsGeometry,
     QgsMessageLog,
     QgsProject,
@@ -25,7 +26,7 @@ from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QInputDialog, QMessageBox
 
 from . import compat, connections, sources, sql
-from .loader import LoadTask, QueryTask
+from .loader import FeatureSink, LoadTask, QueryTask
 
 LOG_TAG = "Redshift Spatial"
 # Marks the layers a load created, so a preview can filter them later.
@@ -283,6 +284,60 @@ class Controller:
                 canvas.refresh()
         for layer, fids in shown:
             canvas.flashFeatureIds(layer, fids)
+
+    def save_rows(self, label, headers, rows, geometry_column=None, path=None):
+        """Write rows already fetched (e.g. the selected preview rows) to a
+        GeoPackage and add it to the project, without querying Redshift
+        again. Column types are inferred from the values. Returns the layers
+        added."""
+        geometry_index = headers.index(geometry_column) if geometry_column in headers else None
+        attr_index = [i for i in range(len(headers)) if i != geometry_index]
+        kinds = [sql.infer_kind([row[i] for row in rows]) for i in attr_index]
+        fields = QgsFields()
+        for name, kind in zip(sql.unique_names([headers[i] for i in attr_index]), kinds):
+            fields.append(QgsField(name, compat.FIELD_TYPES[kind]))
+        crs = QgsCoordinateReferenceSystem()
+        geometries = []
+        for row in rows:
+            geom = None
+            if geometry_index is not None:
+                geom, row_crs = self._row_geometry(row[geometry_index])
+                if geom is not None and not crs.isValid():
+                    crs = row_crs
+            geometries.append(geom)
+        base = f"{label} (selected)"
+        if not path:
+            path = os.path.join(
+                tempfile.mkdtemp(prefix="redshift_spatial_"), f"{sql.safe_file_name(base)}.gpkg"
+            )
+        sink = FeatureSink(path, sql.safe_file_name(base), fields, kinds, crs,
+                           geometry=geometry_index is not None)
+        skipped = 0
+        try:
+            for row, geom in zip(rows, geometries):
+                attributes = [row[i] for i in attr_index]
+                if geometry_index is None:
+                    sink.add(attributes)
+                elif geom is None:
+                    skipped += 1
+                else:
+                    sink.add(attributes, bytes(geom.asWkb()))
+        finally:
+            results = sink.close()
+        if skipped:
+            self.message(tr("{} row(s) without geometry were not saved.").format(skipped), compat.WARNING)
+        added = []
+        for fam, out, layer_name, count in results:
+            name = base if len(results) == 1 else f"{base} ({fam})"
+            layer = QgsVectorLayer(f"{out}|layername={layer_name}", name, "ogr")
+            if layer.isValid():
+                layer.setCustomProperty(SOURCE_PROPERTY, label)
+                QgsProject.instance().addMapLayer(layer)
+                added.append(layer)
+            QgsMessageLog.logMessage(f"{name}: {count} rows in {out}", LOG_TAG, compat.INFO)
+        total = sum(r[3] for r in results)
+        self.message(tr("{}: {} selected row(s) saved.").format(label, total), compat.SUCCESS)
+        return added
 
     def clear_records(self, label):
         """Empty the "(records)" layers of a source, keeping the layers and
