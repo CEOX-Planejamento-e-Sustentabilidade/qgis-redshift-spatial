@@ -495,3 +495,73 @@ def test_close_button_closes_the_preview():
     (close,) = box.buttons()
     close.click()
     assert not dlg.isVisible()
+
+
+def test_show_selected_rows_on_the_map():
+    from qgis.core import QgsProject
+    from qgis.PyQt.QtCore import QItemSelectionModel
+
+    rows = [(1, ewkb_hex("POINT(1 1)", 4326)), (2, ewkb_hex("POINT(2 2)", 4326)),
+            (3, None), (4, ewkb_hex("LINESTRING(0 0,5 5)", 4326))]
+    fake = FakeRedshift([("id", "integer"), ("shape", "geometry")], rows)
+    ctl = SyncController(fake)
+    dlg = dialog.open_preview(ctl, CONN, sources.table("s", "multi", "shape"))
+    dlg.show_selected_on_map()
+    assert "Select one or more rows" in dlg.status.text()
+
+    dlg.table.selectAll()
+    dlg.filter.text.setText("")  # nothing hidden
+    assert [r[0] for r in dlg.table.selected_rows()] == [1, 2, 3, 4]
+    dlg.show_selected_on_map()
+    layers = QgsProject.instance().mapLayersByName("s.multi (records)")
+    points = [l for l in layers if l.geometryType() == compat.POINT_GEOMETRY]
+    lines = [l for l in layers if l.geometryType() == compat.LINE_GEOMETRY]
+    assert points[0].featureCount() == 2 and len(points[0].selectedFeatureIds()) == 2
+    assert lines[0].featureCount() == 1
+
+    # a quick filter hides rows: hidden rows are not shown on the map
+    dlg.table.clearSelection()
+    dlg.filter.column.setCurrentText("id")
+    dlg.filter.text.setText("2")
+    dlg.table.selectAll()
+    assert [r[0] for r in dlg.table.selected_rows()] == [2]
+
+    shown = ctl.show_records("s.multi", ["id", "shape"], [rows[2]], "shape")
+    assert shown == []
+    dlg.reject()
+    QgsProject.instance().removeAllMapLayers()
+
+
+def test_zoom_covers_rows_of_every_geometry_type():
+    from qgis.core import QgsProject
+    from qgis.gui import QgsMapCanvas
+
+    class Bar:
+        def pushMessage(self, *a, **k):
+            pass
+
+    class Iface:
+        def __init__(self):
+            self.canvas = QgsMapCanvas()
+            self.canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
+            self.canvas.resize(400, 400)
+
+        def mapCanvas(self):
+            return self.canvas
+
+        def messageBar(self):
+            return Bar()
+
+        def mainWindow(self):
+            return None
+
+    ctl = Controller(Iface())
+    rows = [(1, ewkb_hex("POINT(-50 -10)", 4326)), (2, ewkb_hex("LINESTRING(10 20,30 40)", 4326))]
+    shown = ctl.show_records("s.zoom", ["id", "shape"], rows, "shape")
+    assert len(shown) == 2
+    extent = ctl.iface.canvas.extent()
+    assert extent.xMinimum() <= -50 and extent.xMaximum() >= 30
+    assert extent.yMinimum() <= -10 and extent.yMaximum() >= 40
+    (layer, fids), = ctl.show_records("s.zoom", ["id", "shape"], rows[:1], "shape")
+    assert ctl.iface.canvas.extent().contains(layer.getFeature(fids[0]).geometry().asPoint())
+    QgsProject.instance().removeAllMapLayers()

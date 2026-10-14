@@ -32,6 +32,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from . import compat, connections, db, sources, sql
+from .compat import QAction
 from .controller import icon, tr
 
 SSL_MODES = ["require", "verify-ca", "verify-full", "prefer", "allow", "disable"]
@@ -252,6 +253,8 @@ class ResultsTable(QTableWidget):
         self.headers, self.rows = [], []
         self.setEditTriggers(compat.NO_EDIT_TRIGGERS)
         self.setSelectionBehavior(compat.SELECT_ROWS)
+        self.setSelectionMode(compat.EXTENDED_SELECTION)
+        self.setContextMenuPolicy(compat.ACTIONS_CONTEXT_MENU)
 
     def set_result(self, headers, rows):
         self.setSortingEnabled(False)
@@ -279,6 +282,22 @@ class ResultsTable(QTableWidget):
 
     def raw_row(self, item):
         return self.rows[item.data(compat.USER_ROLE)]
+
+    def selected_rows(self):
+        """Raw values of the selected, visible rows, in grid order."""
+        rows = sorted({item.row() for item in self.selectedItems()})
+        return [self.raw_row(self.item(r, 0)) for r in rows if not self.isRowHidden(r) and self.item(r, 0)]
+
+    def add_map_action(self, callback):
+        """"Show selected on map" button and context-menu entry."""
+        action = QAction(tr("Show Selected on Map"), self)
+        action.triggered.connect(callback)
+        self.addAction(action)
+        button = QPushButton(tr("Show Selected on Map"))
+        button.setAutoDefault(False)
+        button.setToolTip(tr("Select rows with Ctrl/Shift+click or Ctrl+A"))
+        button.clicked.connect(callback)
+        return button
 
     def apply_filter(self, text, column=-1):
         """Hide rows whose cells (or the given column) do not contain text."""
@@ -369,9 +388,12 @@ class PreviewDialog(QDialog):
         self.table = ResultsTable()
         self.table.itemDoubleClicked.connect(self.show_on_map)
         self.filter = FilterBar(self.table)
-        hint = tr("Double-click a row to show it on the map.") if source["column"] else ""
+        hint = tr("Double-click a row to show it on the map, or select several rows and click "
+                  "'Show Selected on Map'.") if source["column"] else ""
         buttons = QDialogButtonBox(compat.CLOSE)
         buttons.rejected.connect(self.reject)
+        if source["column"]:
+            buttons.addButton(self.table.add_map_action(self.show_selected_on_map), compat.ACTION_ROLE)
 
         layout = QVBoxLayout(self)
         layout.addLayout(top)
@@ -441,6 +463,13 @@ class PreviewDialog(QDialog):
         self.controller.show_record(
             sources.label(self.source), self.table.headers, self.table.raw_row(item), self.source["column"]
         )
+
+    def show_selected_on_map(self):
+        rows = self.table.selected_rows()
+        if not rows:
+            self.status.setText(tr("Select one or more rows first."))
+            return
+        self.controller.show_records(sources.label(self.source), self.table.headers, rows, self.source["column"])
 
     def reject(self):
         cancel_task(self.task)
@@ -526,7 +555,10 @@ class SqlDialog(QDialog):
         bottom_layout.addWidget(self.status)
         bottom_layout.addWidget(self.filter)
         bottom_layout.addWidget(self.table, 1)
-        bottom_layout.addWidget(QLabel(tr("Double-click a row to show it on the map.")))
+        map_row = QHBoxLayout()
+        map_row.addWidget(QLabel(tr("Double-click a row to show it on the map, or select several rows:")), 1)
+        map_row.addWidget(self.table.add_map_action(self.show_selected_on_map))
+        bottom_layout.addLayout(map_row)
         bottom_layout.addLayout(load_form)
         bottom_layout.addWidget(self.form)
         bottom_layout.addWidget(load)
@@ -605,6 +637,18 @@ class SqlDialog(QDialog):
             return
         name = self.layer_name.text().strip() or "query"
         self.controller.show_record(name, self.table.headers, self.table.raw_row(item), column)
+
+    def show_selected_on_map(self):
+        column = self.geometry.currentText()
+        if column == self.NO_GEOMETRY:
+            self.status.setText(tr("Choose the geometry column first."))
+            return
+        rows = self.table.selected_rows()
+        if not rows:
+            self.status.setText(tr("Select one or more rows first."))
+            return
+        name = self.layer_name.text().strip() or "query"
+        self.controller.show_records(name, self.table.headers, rows, column)
 
     def load(self):
         conn, text = self.connection(), self.query_text()

@@ -29,7 +29,8 @@ GeoPackage that QGIS opens natively.
   Queries always run wrapped as a subquery, so they cannot change data.
 - **Preview Rows…** with a `WHERE` filter that runs on the whole table, a
   quick filter over the rows shown (all columns or one), sortable columns,
-  and **double click on a row to see it on the map** (a temporary
+  and **double click on a row (or select several and click *Show Selected on
+  Map*) to see them on the map** (a temporary
   "(records)" layer, the row selected and zoomed to). The same works in the
   SQL window.
 - **Tables without geometry** (optional, per connection: *Also list tables

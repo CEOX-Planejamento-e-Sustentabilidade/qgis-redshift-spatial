@@ -9,11 +9,14 @@ import tempfile
 from qgis.core import (
     QgsApplication,
     QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
     QgsFeature,
+    QgsFeatureRequest,
     QgsField,
     QgsGeometry,
     QgsMessageLog,
     QgsProject,
+    QgsRectangle,
     QgsVectorLayer,
     QgsWkbTypes,
 )
@@ -202,43 +205,84 @@ class Controller:
 
     # records ----------------------------------------------------------------
     def show_record(self, label, headers, row, geometry_column):
-        """Put one previewed row on the map, in a temporary layer per source,
-        select it and zoom to it. The preview already holds the geometry
-        (Redshift prints GEOMETRY as EWKB hex), so no key and no new query
-        are needed. Returns (layer, feature id) or None."""
+        """One row; see show_records. Returns (layer, feature id) or None."""
+        shown = self.show_records(label, headers, [row], geometry_column)
+        if not shown:
+            return None
+        layer, fids = shown[0]
+        return layer, fids[0]
+
+    def show_records(self, label, headers, rows, geometry_column):
+        """Put previewed rows on the map, in a temporary "(records)" layer per
+        source and geometry type, select them and zoom to them all. The
+        preview already holds the geometry (Redshift prints GEOMETRY as EWKB
+        hex), so no key and no new query are needed.
+        Returns [(layer, [feature ids])]; rows without geometry are skipped."""
         if geometry_column not in headers:
             self.message(tr("Column {} is not in the result.").format(geometry_column), compat.WARNING)
-            return None
+            return []
         index = headers.index(geometry_column)
-        value = row[index]
+        added_by_layer, skipped = {}, 0
+        for row in rows:
+            geom, crs = self._row_geometry(row[index])
+            if geom is None:
+                skipped += 1
+                continue
+            layer = self._record_layer(label, headers, index, geom.wkbType(), crs)
+            feature = QgsFeature(layer.fields())
+            feature.setAttributes([None if v is None else str(v) for i, v in enumerate(row) if i != index])
+            feature.setGeometry(geom)
+            ok, added = layer.dataProvider().addFeatures([feature])
+            if ok and added:
+                added_by_layer.setdefault(layer.id(), (layer, []))[1].append(added[0].id())
+        if skipped:
+            self.message(
+                tr("{} row(s) without geometry in {} were skipped.").format(skipped, geometry_column),
+                compat.WARNING,
+            )
+        shown = list(added_by_layer.values())
+        for layer, fids in shown:
+            layer.updateExtents()
+            layer.selectByIds(fids)
+        if shown and self.iface is not None:
+            self._zoom_to(shown)
+        return shown
+
+    @staticmethod
+    def _row_geometry(value):
+        """(QgsGeometry, CRS) from an EWKB value, or (None, None)."""
         try:
             wkb, srid = sql.ewkb_to_iso(value) if value is not None else (None, 0)
         except Exception:  # noqa: BLE001 - not a geometry
-            wkb, srid = None, 0
+            return None, None
         geom = QgsGeometry()
         if wkb:
             geom.fromWkb(wkb)
         if geom.isNull():
-            self.message(tr("This row has no geometry in {}.").format(geometry_column), compat.WARNING)
-            return None
+            return None, None
         crs = QgsCoordinateReferenceSystem(f"EPSG:{srid}") if srid else QgsCoordinateReferenceSystem()
         if not crs.isValid():
             crs = QgsCoordinateReferenceSystem("EPSG:4326")
-        layer = self._record_layer(label, headers, index, geom.wkbType(), crs)
-        feature = QgsFeature(layer.fields())
-        feature.setAttributes([None if v is None else str(v) for i, v in enumerate(row) if i != index])
-        feature.setGeometry(geom)
-        ok, added = layer.dataProvider().addFeatures([feature])
-        if not ok or not added:
-            return None
-        fid = added[0].id()
-        layer.updateExtents()
-        layer.selectByIds([fid])
-        if self.iface is not None:
-            canvas = self.iface.mapCanvas()
-            canvas.zoomToFeatureIds(layer, [fid])
-            canvas.flashFeatureIds(layer, [fid])
-        return layer, fid
+        return geom, crs
+
+    def _zoom_to(self, shown):
+        canvas = self.iface.mapCanvas()
+        if len(shown) == 1:
+            layer, fids = shown[0]
+            canvas.zoomToFeatureIds(layer, fids)
+        else:  # several layers (geometry types): zoom to the union of extents
+            target = canvas.mapSettings().destinationCrs()
+            extent = QgsRectangle()
+            extent.setMinimal()
+            for layer, fids in shown:
+                transform = QgsCoordinateTransform(layer.crs(), target, QgsProject.instance())
+                for f in layer.getFeatures(QgsFeatureRequest().setFilterFids(fids)):
+                    extent.combineExtentWith(transform.transformBoundingBox(f.geometry().boundingBox()))
+            if not extent.isEmpty():
+                canvas.setExtent(extent.buffered(max(extent.width(), extent.height()) * 0.05 or 0.001))
+                canvas.refresh()
+        for layer, fids in shown:
+            canvas.flashFeatureIds(layer, fids)
 
     def _record_layer(self, label, headers, geometry_index, wkb_type, crs):
         type_name = QgsWkbTypes.displayString(wkb_type)
