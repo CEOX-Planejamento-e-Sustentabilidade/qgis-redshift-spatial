@@ -47,7 +47,11 @@ GeoPackage that QGIS opens natively.
 - Spatial columns are discovered from `SVV_COLUMNS` (late-binding views
   included).
 - Optional `WHERE` filter and row limit; the load options count the rows
-  that will be loaded before you confirm.
+  that will be loaded before you confirm. A filtered table is named after
+  its filter (`vw_sema_car [codigo_municipio = '5106752']`, cut short when
+  long); the layer tooltip shows the whole filter, limit and connection.
+  The name follows the filter when the query is edited, unless you
+  renamed the layer.
 - CRS from `ST_SRID`; a fallback CRS for SRID 0.
 - Runs as a background task with progress and cancel.
 - One layer per geometry family; single geometries are promoted to multi, so

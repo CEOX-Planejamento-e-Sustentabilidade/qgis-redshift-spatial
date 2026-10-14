@@ -236,3 +236,23 @@ def test_safe_file_name():
     assert sql.safe_file_name("gold.vw_car (selected)") == "gold_vw_car__selected"
     assert sql.safe_file_name("ação/2026") == "ação_2026"
     assert sql.safe_file_name("...") == "layer"
+
+
+def test_layer_name_shows_the_filter_cut_short():
+    assert sources.layer_name("vw_sema_car", "") == "vw_sema_car"
+    assert sources.layer_name("vw_sema_car", None) == "vw_sema_car"
+    assert sources.layer_name("vw_sema_car", " WHERE codigo_municipio = '5106752';") == (
+        "vw_sema_car [codigo_municipio = '5106752']"
+    )
+    assert sources.layer_name("t", "a = 1\n  AND b = 2") == "t [a = 1 AND b = 2]"
+    long = sources.layer_name("t", "x = '" + "9" * 100 + "'")
+    assert long.startswith("t [x = '999") and long.endswith("…]")
+    assert len(long) == len("t [") + sources.NAME_FILTER_MAX + 1
+
+
+def test_describe_lists_source_filter_limit_and_connection():
+    origin = {"connection": "cluster", "source": sources.table("gold", "vw_sema_car", "geometria"),
+              "where": "where a = 1", "limit": 50}
+    assert sources.describe(origin) == "gold.vw_sema_car\nWHERE a = 1\nLIMIT 50\nRedshift connection: cluster"
+    origin = {"connection": "c", "source": sources.query("SELECT 1", "g", "q"), "where": "", "limit": 0}
+    assert sources.describe(origin) == "SELECT 1\nRedshift connection: c"

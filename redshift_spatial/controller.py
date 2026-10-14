@@ -39,6 +39,8 @@ SOURCE_PROPERTY = "redshift_spatial/source"
 # How a layer was loaded (connection, source, filter, limit), so that it can
 # be edited and loaded again in place. JSON; saved with the project.
 ORIGIN_PROPERTY = "redshift_spatial/origin"
+# the name the plugin gave the layer, to tell a rename by the user
+AUTO_NAME_PROPERTY = "redshift_spatial/auto_name"
 FAMILIES = ("point", "line", "polygon", "collection")
 ICON_PATH = os.path.join(os.path.dirname(__file__), "icon.svg")
 
@@ -232,11 +234,15 @@ class Controller:
         layers = []
         for fam, path, layer_name, count in task.results:
             name = f"{base} ({fam})" if many else base
+            if origin is not None and task.source["kind"] == "table":
+                name = sources.layer_name(name, origin["where"])
             layer = QgsVectorLayer(f"{path}|layername={layer_name}", name, "ogr")
             if layer.isValid():
                 layer.setCustomProperty(SOURCE_PROPERTY, label)
                 if origin is not None:
                     layer.setCustomProperty(ORIGIN_PROPERTY, json.dumps(origin))
+                    layer.setCustomProperty(AUTO_NAME_PROPERTY, name)
+                    compat.set_abstract(layer, sources.describe(origin))
                 layers.append(layer)
             QgsMessageLog.logMessage(f"{name}: {count} features in {path}", LOG_TAG, compat.INFO)
         self._add_layers(layers, self.layers_of_load(getattr(task, "replace", None)))
@@ -246,8 +252,9 @@ class Controller:
 
     def _add_layers(self, layers, old):
         """Add the new layers; when they replace old ones, put them where the
-        old ones were in the Layers panel, keep the name and the style the
-        user gave them (same geometry type), then remove the old ones."""
+        old ones were in the Layers panel, keep the style and any name the
+        user gave them (same geometry type), then remove the old ones. A
+        name the plugin gave follows the new filter."""
         project = QgsProject.instance()
         if not old:
             for layer in layers:
@@ -266,7 +273,7 @@ class Controller:
             previous = by_type.get(layer.geometryType())
             if previous is not None:
                 copy_style(previous, layer)
-                if len(old) == 1 and len(layers) == 1:
+                if previous.name() != previous.customProperty(AUTO_NAME_PROPERTY):
                     layer.setName(previous.name())
             project.addMapLayer(layer, False)
             group.insertLayer(index + offset, layer)

@@ -102,3 +102,13 @@ except AttributeError:  # pragma: no cover - QGIS 3.28
     VECTOR_LAYER = QgsMapLayerType.VectorLayer
 STYLE_SYMBOLOGY = _enum(QgsMapLayer, "StyleCategory", "Symbology")
 STYLE_LABELING = _enum(QgsMapLayer, "StyleCategory", "Labeling")
+
+
+def set_abstract(layer, text):
+    """The Layers panel tooltip shows the abstract: the metadata one in
+    recent QGIS, layer.abstract() in older ones (no server setter yet)."""
+    metadata = layer.metadata()
+    metadata.setAbstract(text)
+    layer.setMetadata(metadata)
+    if not hasattr(layer.serverProperties(), "setAbstract"):
+        layer.setAbstract(text)

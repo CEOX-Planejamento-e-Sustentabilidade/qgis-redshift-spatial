@@ -6,7 +6,8 @@ column nodes of the Browser. Run through tests/run_qgis.py."""
 import os
 import tempfile
 
-from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsVectorLayer
+from qgis.core import Qgis, QgsCoordinateReferenceSystem, QgsLayerTreeModel, QgsVectorLayer
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 
 from redshift_spatial import browser, compat, connections, db, dialog, loader, sources
@@ -14,6 +15,7 @@ from redshift_spatial.controller import Controller
 
 from helpers import FakeRedshift, hex_wkb
 
+TOOLTIP_ROLE = compat._enum(Qt, "ItemDataRole", "ToolTipRole")
 CONN = dict(connections.DEFAULTS, name="cluster", host="h", database="d", list_all_tables=True)
 
 
@@ -883,7 +885,11 @@ def test_edit_table_layer_reopens_its_options():
     source = sources.table("s", "towns", "shape")
     options = {"where": "id = 1", "limit": 0, "path": "", "fallback_crs": QgsCoordinateReferenceSystem("EPSG:4326")}
     ctl.load(CONN, source, options)
-    (layer,) = QgsProject.instance().mapLayersByName("towns")
+    (layer,) = QgsProject.instance().mapLayersByName("towns [id = 1]")
+    assert layer.metadata().abstract() == "s.towns\nWHERE id = 1\nRedshift connection: cluster"
+    model = QgsLayerTreeModel(QgsProject.instance().layerTreeRoot())
+    index = model.node2index(QgsProject.instance().layerTreeRoot().findLayer(layer.id()))
+    assert "WHERE id = 1<br/>Redshift connection: cluster" in model.data(index, TOOLTIP_ROLE)
     load_id = controller_module.origin_of(layer)["load_id"]
     layer_id = layer.id()
 
@@ -903,7 +909,8 @@ def test_edit_table_layer_reopens_its_options():
     finally:
         connections.names, connections.load, dialog.LoadOptionsDialog.exec = original
     assert seen == {"where": "id = 1", "replace": True}
-    (new,) = QgsProject.instance().mapLayersByName("towns")
+    (new,) = QgsProject.instance().mapLayersByName("towns [id = 2]")  # the name follows the filter
+    assert "WHERE id = 2" in new.metadata().abstract()
     assert new.id() != layer_id and controller_module.origin_of(new)["where"] == "id = 2"
     assert controller_module.origin_of(new)["load_id"] == load_id
 
