@@ -448,6 +448,28 @@ class PreviewDialog(QDialog):
         super().reject()
 
 
+def open_preview(controller, conn, source, parent=None, where=None):
+    """One preview window per connection and table: opening it again
+    brings the existing window back (with the new filter, if one is given)
+    instead of stacking identical windows."""
+    key = (conn["name"], sources.label(source))
+    dlg = controller.previews.get(key)
+    try:
+        alive = dlg is not None and dlg.isVisible() is not None
+    except RuntimeError:  # deleted with its parent window
+        alive = False
+    if not alive:
+        dlg = PreviewDialog(controller, conn, source, parent, where=where or "")
+        controller.previews[key] = dlg
+    elif where is not None and where != dlg.where.text():
+        dlg.where.setText(where)
+        dlg.run()
+    dlg.show()
+    dlg.raise_()
+    dlg.activateWindow()
+    return dlg
+
+
 class SqlDialog(QDialog):
     """Run any SELECT, look at the first rows and load the result as a
     layer (or a table, without geometry). The query always runs wrapped as a
@@ -747,7 +769,7 @@ class LoadLayerDialog(QDialog):
         source = self.selected_source(item)
         conn = self.current_connection() if source else None
         if conn is not None:
-            PreviewDialog(self.controller, conn, source, self, where=self.form.where.text()).show()
+            open_preview(self.controller, conn, source, self, where=self.form.where.text())
 
     def open_sql(self):
         SqlDialog(self.controller, self.conn_combo.currentText(), self).show()

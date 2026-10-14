@@ -59,6 +59,7 @@ class Controller:
         self.tasks = []  # keep Python references while QGIS runs them
         self.passwords = {}  # session only, never written to disk
         self.record_layers = {}  # (label, geometry type, crs, headers) -> layer id
+        self.previews = {}  # (connection, source label) -> PreviewDialog
 
     def parent_window(self):
         return self.iface.mainWindow() if self.iface is not None else None

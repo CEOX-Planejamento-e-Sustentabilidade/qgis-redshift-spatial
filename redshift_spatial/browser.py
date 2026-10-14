@@ -24,11 +24,11 @@ from .compat import QAction
 from .controller import icon, tr
 from .dialog import (
     LoadOptionsDialog,
-    PreviewDialog,
     SqlDialog,
     WaitCursor,
     edit_connection,
     new_connection,
+    open_preview,
     remove_connection,
 )
 
@@ -220,7 +220,7 @@ class TableItem(QgsDataCollectionItem):
             self.controller.load(self.connection(), self.source, dlg.form.options())
 
     def preview(self):
-        PreviewDialog(self.controller, self.connection(), self.source, self.controller.parent_window()).show()
+        open_preview(self.controller, self.connection(), self.source, self.controller.parent_window())
 
 
 class ColumnItem(QgsDataItem):

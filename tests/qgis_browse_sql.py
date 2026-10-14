@@ -466,3 +466,32 @@ def test_preview_from_the_add_layer_window_uses_its_filter():
     dlg = dialog.PreviewDialog(ctl, CONN, sources.table("s", "t"), where="id = 1")
     assert dlg.where.text() == "id = 1"
     assert ctl.queries[-1] == 'SELECT * FROM "s"."t" WHERE (id = 1) LIMIT 100'
+
+
+def test_preview_window_is_reused_per_table():
+    fake = FakeRedshift([("id", "integer")], [(i,) for i in range(3)])
+    ctl = SyncController(fake)
+    first = dialog.open_preview(ctl, CONN, sources.table("s", "t"))
+    again = dialog.open_preview(ctl, CONN, sources.table("s", "t"))
+    assert again is first and len(ctl.queries) == 1
+    first.reject()
+    assert not first.isVisible()
+    reopened = dialog.open_preview(ctl, CONN, sources.table("s", "t"), where="id = 1")
+    assert reopened is first and reopened.isVisible()
+    assert ctl.queries[-1].endswith("WHERE (id = 1) LIMIT 100")
+    other = dialog.open_preview(ctl, CONN, sources.table("s", "u"))
+    assert other is not first
+    for dlg in (first, other):
+        dlg.reject()
+
+
+def test_close_button_closes_the_preview():
+    from qgis.PyQt.QtWidgets import QDialogButtonBox
+
+    fake = FakeRedshift([("id", "integer")], [(1,)])
+    dlg = dialog.open_preview(SyncController(fake), CONN, sources.table("s", "t"))
+    assert dlg.isVisible()
+    (box,) = dlg.findChildren(QDialogButtonBox)
+    (close,) = box.buttons()
+    close.click()
+    assert not dlg.isVisible()
