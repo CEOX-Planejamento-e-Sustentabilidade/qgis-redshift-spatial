@@ -17,6 +17,7 @@ DEFAULTS = {
     "sslmode": "require",
     "username": "",
     "authcfg": "",
+    "list_all_tables": False,
 }
 
 
@@ -33,7 +34,12 @@ def load(name):
     data = {"name": name}
     for key, default in DEFAULTS.items():
         value = s.value(f"{GROUP}/{name}/{key}", default)
-        data[key] = int(value) if key == "port" else str(value or "")
+        if key == "port":
+            data[key] = int(value)
+        elif isinstance(default, bool):
+            data[key] = str(value).lower() in ("true", "1")
+        else:
+            data[key] = str(value or "")
     return data
 
 

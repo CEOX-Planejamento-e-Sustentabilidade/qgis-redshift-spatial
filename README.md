@@ -19,20 +19,46 @@ GeoPackage that QGIS opens natively.
 
 ## Features
 
-- **Browser panel entry "Redshift Spatial"**: connection > schema > table.
-  Double click a table to add it, or right click for *Add Layer with
-  Filter…*. (Dragging onto the map needs a native data provider, which
-  Redshift lacks.)
+- **Browser panel entry "Redshift Spatial"**: connection > schema > table >
+  columns. Double click a table to add it; right click for *Add Layer with
+  Filter…* and *Preview Rows…*. (Dragging onto the map needs a native data
+  provider, which Redshift lacks.)
+- **Execute SQL…** (Browser connection menu or *Database → Redshift
+  Spatial*): run any `SELECT`, see the first rows and add the result as a
+  layer, picking the geometry column, or as a table without geometry.
+  Queries always run wrapped as a subquery, so they cannot change data.
+- **Preview Rows…** shows how many rows match ("Showing 100 of 12,345"),
+  with a `WHERE` filter that runs on the whole table, a
+  quick filter over the rows shown (all columns or one), sortable columns,
+  and **double click on a row (or select several and click *Show Selected on
+  Map*) to see them on the map** (a temporary
+  "(records)" layer, the row selected and zoomed to; *Clear Records* empties
+  it). *Add Layer…* saves only the selected rows (no new query) or loads
+  every row matching the preview's WHERE; it asks when rows are selected. The same
+  works in the SQL window.
+- **Edit Redshift Query…** (right click a loaded layer in the Layers panel)
+  reopens the query in the SQL window, or the filter and limit of a table
+  load. Loading again replaces the layer in place, keeping its position,
+  name and style. The query is saved with the project.
+- **Tables without geometry** (optional, per connection: *Also list tables
+  without geometry*) load as attribute tables, e.g. to join with a layer.
 - Saved connections; passwords live only in the QGIS authentication database
   (or are asked for once per session).
-- Lists every geometry/geography column visible to the user, from
-  `SVV_COLUMNS` (late-binding views included).
-- Optional `WHERE` filter and row limit.
+- Spatial columns are discovered from `SVV_COLUMNS` (late-binding views
+  included).
+- Optional `WHERE` filter and row limit; the load options count the rows
+  that will be loaded before you confirm. A filtered table is named after
+  its filter (`vw_sema_car [codigo_municipio = '5106752']`, cut short when
+  long); the layer tooltip shows the whole filter, limit and connection.
+  The name follows the filter when the query is edited, unless you
+  renamed the layer.
 - CRS from `ST_SRID`; a fallback CRS for SRID 0.
 - Runs as a background task with progress and cancel.
 - One layer per geometry family; single geometries are promoted to multi, so
   `POLYGON` and `MULTIPOLYGON` share a layer.
 - Read only: the plugin never writes to Redshift.
+- Interface in English or Portuguese (Brazil), following the language of
+  QGIS. Texts live in `redshift_spatial/i18n.py`.
 
 ## Install
 

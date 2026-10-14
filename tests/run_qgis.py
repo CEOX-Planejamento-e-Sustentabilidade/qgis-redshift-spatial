@@ -24,6 +24,11 @@ from qgis.core import Qgis, QgsApplication  # noqa: E402
 app = QgsApplication([], True)
 app.initQgis()
 
+from redshift_spatial import i18n  # noqa: E402
+
+# the tests check English texts, whatever the language of this QGIS
+i18n.set_language("en")
+
 
 def main():
     selected = sys.argv[1] if len(sys.argv) > 1 else ""

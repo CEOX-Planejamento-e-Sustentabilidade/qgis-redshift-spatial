@@ -18,7 +18,7 @@ from qgis.core import (
     QgsWkbTypes,
 )
 
-from redshift_spatial import compat, loader
+from redshift_spatial import compat, loader, sources
 from redshift_spatial.controller import Controller
 from redshift_spatial.dialog import ConnectionDialog, LoadLayerDialog, LoadOptionsDialog
 
@@ -108,7 +108,8 @@ def test_dialogs_build():
     ctl = Controller(None)
     LoadLayerDialog(ctl)
     ConnectionDialog(ctl)
-    LoadOptionsDialog(("analytics", "parcels", "shape", "geometry"))
+    LoadOptionsDialog(sources.table("analytics", "parcels", "shape", "geometry"))
+    LoadOptionsDialog(sources.table("analytics", "lookup"))
 
 
 def test_icon_renders():
@@ -142,32 +143,46 @@ def test_browser_tree():
         connections.names = original
     assert [c.name() for c in conns] == ["cluster"]
     assert conns[0].createChildren() == []
-    assert [a.text() for a in conns[0].actions(None)][0] == "Refresh"
+    assert [a.text() for a in conns[0].actions(None)][:2] == ["Execute SQL…", "Refresh"]
 
     rows = [("analytics", "parcels", "shape", "geometry"),
             ("analytics", "pts", "g1", "geometry"), ("analytics", "pts", "g2", "geography")]
     schema = browser.SchemaItem(conns[0], "analytics", rows, ctl)
     tables = schema.createChildren()
     assert [t.name() for t in tables] == ["parcels", "pts (g1)", "pts (g2)"]
-    assert tables[0].source == rows[0]
+    assert tables[0].source == sources.from_row(rows[0])
     assert tables[0].path() == "redshift_spatial:/cluster/analytics/parcels/shape"
-    assert tables[0].state() == Qgis.BrowserItemState.Populated
-    assert [a.text() for a in tables[0].actions(None)] == ["Add Layer", "Add Layer with Filter…"]
+    assert [a.text() for a in tables[0].actions(None)] == ["Add Layer", "Add Layer with Filter…", "Preview Rows…"]
 
 
 def test_plugin_registers_and_unregisters_browser_provider():
     from redshift_spatial import classFactory
 
+    from qgis.core import QgsProject, QgsVectorLayer
+
+    from redshift_spatial.controller import ORIGIN_PROPERTY
+
+    calls = []
+
     class FakeIface:
         def __getattr__(self, name):
-            return lambda *a, **k: None
+            return lambda *a, **k: calls.append((name, a))
 
     registry = QgsApplication.dataItemProviderRegistry()
     plugin = classFactory(FakeIface())
     plugin.initGui()
     assert registry.provider("Redshift Spatial") is not None
+    ours = QgsVectorLayer("Point?crs=EPSG:4326", "ours", "memory")
+    ours.setCustomProperty(ORIGIN_PROPERTY, '{"source": {}, "connection": "c", "load_id": "x"}')
+    other = QgsVectorLayer("Point?crs=EPSG:4326", "other", "memory")
+    QgsProject.instance().addMapLayers([ours, other])
+    edited = [a[1] for name, a in calls if name == "addCustomActionForLayer"]
+    assert edited == [ours]  # "Edit Redshift Query..." only on layers it loaded
     plugin.unload()
     assert registry.provider("Redshift Spatial") is None
+    assert any(name == "removeCustomActionForLayerType" for name, a in calls)
+    QgsProject.instance().addMapLayer(QgsVectorLayer("Point?crs=EPSG:4326", "late", "memory"))
+    QgsProject.instance().removeAllMapLayers()
 
 
 def test_field_types_cover_sql_kinds():

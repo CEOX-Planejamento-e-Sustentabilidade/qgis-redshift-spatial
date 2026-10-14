@@ -7,10 +7,11 @@ and QGIS 3.30+ moves several enums into Qgis.*. Every name below works from
 QGIS 3.28 on.
 """
 
-from qgis.core import Qgis, QgsTask, QgsVectorFileWriter, QgsWkbTypes
+from qgis.core import Qgis, QgsMapLayer, QgsTask, QgsVectorFileWriter, QgsWkbTypes
 from qgis.gui import QgsFileWidget
 from qgis.PyQt.QtCore import QMetaType, Qt, QVariant
-from qgis.PyQt.QtWidgets import QDialogButtonBox, QLineEdit, QMessageBox
+from qgis.PyQt.QtGui import QFontDatabase
+from qgis.PyQt.QtWidgets import QAbstractItemView, QDialogButtonBox, QLineEdit, QMessageBox
 
 try:  # Qt5 keeps QAction in QtWidgets, Qt6 moved it to QtGui
     from qgis.PyQt.QtWidgets import QAction
@@ -27,17 +28,30 @@ def _enum(owner, scope, name):
 
 # Qt
 USER_ROLE = _enum(Qt, "ItemDataRole", "UserRole")
+DISPLAY_ROLE = _enum(Qt, "ItemDataRole", "DisplayRole")
 WAIT_CURSOR = _enum(Qt, "CursorShape", "WaitCursor")
 UTC = _enum(Qt, "TimeSpec", "UTC")
 LOCAL_TIME = _enum(Qt, "TimeSpec", "LocalTime")
 YES = _enum(QMessageBox, "StandardButton", "Yes")
+CANCEL_BUTTON = _enum(QMessageBox, "StandardButton", "Cancel")
+# QMessageBox has its own ButtonRole enum, distinct from QDialogButtonBox's.
+MB_ACCEPT_ROLE = _enum(QMessageBox, "ButtonRole", "AcceptRole")
+MB_ACTION_ROLE = _enum(QMessageBox, "ButtonRole", "ActionRole")
 NO = _enum(QMessageBox, "StandardButton", "No")
 SAVE = _enum(QDialogButtonBox, "StandardButton", "Save")
 CANCEL = _enum(QDialogButtonBox, "StandardButton", "Cancel")
 CLOSE = _enum(QDialogButtonBox, "StandardButton", "Close")
 ACCEPT_ROLE = _enum(QDialogButtonBox, "ButtonRole", "AcceptRole")
 ACTION_ROLE = _enum(QDialogButtonBox, "ButtonRole", "ActionRole")
+REJECT_ROLE = _enum(QDialogButtonBox, "ButtonRole", "RejectRole")
 PASSWORD = _enum(QLineEdit, "EchoMode", "Password")
+NO_EDIT_TRIGGERS = _enum(QAbstractItemView, "EditTrigger", "NoEditTriggers")
+SELECT_ROWS = _enum(QAbstractItemView, "SelectionBehavior", "SelectRows")
+EXTENDED_SELECTION = _enum(QAbstractItemView, "SelectionMode", "ExtendedSelection")
+ACTIONS_CONTEXT_MENU = _enum(Qt, "ContextMenuPolicy", "ActionsContextMenu")
+VERTICAL = _enum(Qt, "Orientation", "Vertical")
+ASCENDING = _enum(Qt, "SortOrder", "AscendingOrder")
+FIXED_FONT = _enum(QFontDatabase, "SystemFont", "FixedFont")
 
 # QGIS
 SAVE_FILE = _enum(QgsFileWidget, "StorageMode", "SaveFile")
@@ -53,6 +67,7 @@ _WKB = getattr(Qgis, "WkbType", QgsWkbTypes)
 GEOMETRY_COLLECTION = _WKB.GeometryCollection
 MULTI_POLYGON = _WKB.MultiPolygon
 MULTI_LINE_STRING = _WKB.MultiLineString
+NO_GEOMETRY = _WKB.NoGeometry
 if hasattr(Qgis, "GeometryType"):
     POINT_GEOMETRY = Qgis.GeometryType.Point
     LINE_GEOMETRY = Qgis.GeometryType.Line
@@ -77,3 +92,23 @@ else:
         "date": QVariant.Date,
         "datetime": QVariant.DateTime,
     }
+
+# Layer tree context menu and style copy
+try:  # Qgis.LayerType arrived in QGIS 3.30
+    VECTOR_LAYER = Qgis.LayerType.Vector
+except AttributeError:  # pragma: no cover - QGIS 3.28
+    from qgis.core import QgsMapLayerType
+
+    VECTOR_LAYER = QgsMapLayerType.VectorLayer
+STYLE_SYMBOLOGY = _enum(QgsMapLayer, "StyleCategory", "Symbology")
+STYLE_LABELING = _enum(QgsMapLayer, "StyleCategory", "Labeling")
+
+
+def set_abstract(layer, text):
+    """The Layers panel tooltip shows the abstract: the metadata one in
+    recent QGIS, layer.abstract() in older ones (no server setter yet)."""
+    metadata = layer.metadata()
+    metadata.setAbstract(text)
+    layer.setMetadata(metadata)
+    if not hasattr(layer.serverProperties(), "setAbstract"):
+        layer.setAbstract(text)

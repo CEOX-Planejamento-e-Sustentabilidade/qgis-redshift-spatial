@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 CEOX Planejamento e Otimização
-"""Dialogs: saved connections, load options and the "Add Redshift layer" window."""
+"""Dialogs: saved connections, load options, the "Add layer" window, row
+previews and the SQL window."""
+
+from decimal import Decimal
 
 from qgis.core import QgsCoordinateReferenceSystem
 from qgis.gui import QgsAuthConfigSelect, QgsFileWidget, QgsProjectionSelectionWidget
-from qgis.PyQt.QtGui import QCursor
+from qgis.PyQt.QtCore import QLocale
+from qgis.PyQt.QtGui import QCursor, QFontDatabase, QKeySequence
 from qgis.PyQt.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -15,18 +20,28 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from . import compat, connections, db
+from . import compat, connections, db, sources, sql
+from .compat import QAction
 from .controller import icon, tr
 
 SSL_MODES = ["require", "verify-ca", "verify-full", "prefer", "allow", "disable"]
+
+
+def number(n):
+    return QLocale().toString(int(n))
+CELL_CHARS = 200
 
 
 class WaitCursor:
@@ -60,6 +75,8 @@ class ConnectionDialog(QDialog):
         self.username.setPlaceholderText(tr("used when no authentication is selected"))
         self.auth = QgsAuthConfigSelect(self, "postgres")
         self.auth.setConfigId(conn["authcfg"])
+        self.list_all = QCheckBox(tr("Also list tables without geometry"))
+        self.list_all.setChecked(bool(conn.get("list_all_tables")))
 
         form = QFormLayout()
         form.addRow(tr("Name"), self.name)
@@ -69,6 +86,7 @@ class ConnectionDialog(QDialog):
         form.addRow(tr("SSL mode"), self.sslmode)
         form.addRow(tr("Username"), self.username)
         form.addRow(tr("Authentication"), self.auth)
+        form.addRow("", self.list_all)
 
         test = QPushButton(tr("Test Connection"))
         test.clicked.connect(self.test)
@@ -93,6 +111,7 @@ class ConnectionDialog(QDialog):
             "sslmode": self.sslmode.currentText(),
             "username": self.username.text().strip(),
             "authcfg": self.auth.configId(),
+            "list_all_tables": self.list_all.isChecked(),
         }
 
     def test(self):
@@ -143,7 +162,7 @@ def remove_connection(name, parent=None):
 class OptionsForm(QWidget):
     """Filter, limit, fallback CRS and output file of a load."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, with_crs=True):
         super().__init__(parent)
         self.where = QLineEdit()
         self.where.setPlaceholderText(tr("optional SQL filter, e.g. region = 'north'"))
@@ -161,8 +180,17 @@ class OptionsForm(QWidget):
         form.setContentsMargins(0, 0, 0, 0)
         form.addRow(tr("Filter (WHERE)"), self.where)
         form.addRow(tr("Row limit"), self.limit)
-        form.addRow(tr("CRS when SRID is 0"), self.crs)
+        if with_crs:
+            form.addRow(tr("CRS when SRID is 0"), self.crs)
         form.addRow(tr("Save to"), self.output)
+
+    def set_options(self, origin):
+        """Filter, limit and CRS of an earlier load (controller.ORIGIN_PROPERTY)."""
+        self.where.setText(origin.get("where") or "")
+        self.limit.setValue(origin.get("limit") or 0)
+        crs = QgsCoordinateReferenceSystem(origin.get("crs") or "")
+        if crs.isValid():
+            self.crs.setCrs(crs)
 
     def options(self):
         return {
@@ -174,23 +202,709 @@ class OptionsForm(QWidget):
 
 
 class LoadOptionsDialog(QDialog):
-    """Asked from the Browser panel ("Add Layer with Filter…")."""
+    """Load options ("Add Layer with Filter…", the preview's Add Layer).
+    With a controller and a connection it also counts the rows the load
+    will bring, again whenever the filter or the limit changes."""
 
-    def __init__(self, source, parent=None):
+    def __init__(self, source, parent=None, where="", controller=None, conn=None, replacing=False):
         super().__init__(parent)
-        schema, table, column, _ = source
-        self.setWindowTitle(tr("Add {}.{}").format(schema, table))
+        self.source = source
+        self.controller = controller
+        self.conn = conn
+        self.total = None
+        self.task = None
+        self.serial = 0
+        self.setWindowTitle(tr("Add {}").format(sources.label(source)))
         self.setWindowIcon(icon())
-        self.form = OptionsForm()
+        self.form = OptionsForm(with_crs=bool(source["column"]))
+        self.form.where.setText(where or "")
+        self.count_label = QLabel()
+        self.count_label.setWordWrap(True)
+        self.form.where.editingFinished.connect(self.recount)
+        self.form.limit.valueChanged.connect(self.show_count)
+        self.replace_box = replace_box(replacing)
         buttons = QDialogButtonBox(compat.CANCEL)
         buttons.addButton(tr("Add Layer"), compat.ACCEPT_ROLE)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"{schema}.{table} ({column})"))
+        detail = f" ({source['column']})" if source["column"] else tr(" (no geometry)")
+        layout.addWidget(QLabel(sources.label(source) + detail))
         layout.addWidget(self.form)
+        layout.addWidget(self.count_label)
+        layout.addWidget(self.replace_box)
         layout.addWidget(buttons)
         self.resize(520, self.sizeHint().height())
+        self.counted_where = None
+        self.recount()
+
+    def count_sql(self):
+        src = self.source
+        geom = sql.geometry_expression(src["column"], src["data_type"]) if src["column"] else None
+        if src["kind"] == "table":
+            from_clause = sql.table_ref(src["schema"], src["table"])
+        else:
+            from_clause = sql.query_from(src["sql"])
+        # same rows as the load: with a geometry, rows without one are left out
+        return sql.count_query(from_clause, geom, self.form.where.text())
+
+    def recount(self):
+        where = sql.clean_filter(self.form.where.text())
+        if self.controller is None or self.conn is None or where == self.counted_where:
+            return
+        self.counted_where = where
+        cancel_task(self.task)
+        self.task, self.total = None, None
+        self.serial += 1
+        serial = self.serial
+        self.count_label.setText(tr("Counting rows…"))
+        done = []
+
+        def latest_only(task, ok):
+            done.append(True)
+            if serial != self.serial:
+                return
+            self.task = None
+            self.total = task.total if ok else None
+            if not ok and task.error is not None:
+                self.count_label.setText(failure_text(task))
+                set_error(self.count_label, True)
+            else:
+                self.show_count()
+
+        task = self.controller.run_query(self.conn, None, "count", latest_only, self, count_query=self.count_sql())
+        if task is not None and not done:  # the count may already be here
+            self.task = task
+
+    def show_count(self, *args):
+        if self.total is None:
+            return
+        set_error(self.count_label, False)
+        limit = self.form.limit.value()
+        if limit and limit < self.total:
+            text = tr("{} of {} matching rows will be loaded (row limit).").format(number(limit), number(self.total))
+        else:
+            text = tr("{} rows will be loaded.").format(number(self.total))
+        self.count_label.setText(text)
+
+    def reject(self):
+        cancel_task(self.task)
+        super().reject()
+
+
+def replace_box(replacing):
+    """"Replace the current layer" check box, shown when editing a layer."""
+    box = QCheckBox(tr("Replace the current layer (same place in the Layers panel, same style)"))
+    box.setChecked(bool(replacing))
+    box.setVisible(bool(replacing))
+    return box
+
+
+def edit_origin(controller, origin, parent=None):
+    """Reopen what a layer was loaded from (see Controller.edit_layer)."""
+    source = origin["source"]
+    if source["kind"] == "query":
+        dlg = SqlDialog(controller, origin["connection"], parent, origin=origin)
+        dlg.show()
+        return dlg
+    conn = connections.load(origin["connection"])
+    dlg = LoadOptionsDialog(source, parent, where=origin.get("where") or "",
+                            controller=controller, conn=conn, replacing=True)
+    dlg.form.set_options(origin)
+    dlg.setWindowTitle(tr("Edit {}").format(sources.label(source)))
+    if dlg.exec():
+        replace = origin["load_id"] if dlg.replace_box.isChecked() else None
+        controller.load(conn, source, dlg.form.options(), parent, replace=replace)
+    return dlg
+
+
+# results ------------------------------------------------------------------------
+
+
+def display(value):
+    """Short text for a grid cell; geometries and binaries are summarized."""
+    if value is None:
+        return "NULL"
+    if sql.looks_like_wkb(value):
+        return tr("<WKB/binary, {} bytes>").format(len(value) // 2)
+    text = str(value)
+    return text if len(text) <= CELL_CHARS else text[:CELL_CHARS] + "…"
+
+
+def set_error(label, error):
+    label.setStyleSheet("color: #c0392b; font-weight: bold;" if error else "")
+    label.setWordWrap(True)
+
+
+def failure_text(task):
+    if task.error is None:
+        return tr("Canceled.")
+    return tr("Query failed: {}").format(str(task.error).strip())
+
+
+SELECTED, ALL = "selected", "all"
+
+
+def shown_text(shown, total):
+    if total is None:
+        return tr("{} rows.").format(number(shown))
+    if total > shown:
+        return tr("Showing {} of {} matching rows.").format(number(shown), number(total))
+    return tr("All {} matching rows shown.").format(number(total))
+
+
+def choose_scope(parent, selected, total):
+    """SELECTED, ALL or None for Add Layer: with nothing selected, every
+    row; when the selection already is every matching row, no question."""
+    if not selected:
+        return ALL
+    if total is not None and selected >= total:
+        return SELECTED
+    return ask_scope(parent, selected, total)
+
+
+def ask_scope(parent, selected, total=None):
+    """Add Layer with rows selected: only those rows, or every row of the
+    query? Returns SELECTED, ALL or None (cancel)."""
+    box = QMessageBox(parent)
+    box.setWindowTitle(tr("Add Layer"))
+    text = tr("{} row(s) are selected. What should the new layer contain?").format(number(selected))
+    if total is not None:
+        text += "\n" + tr("{} rows match the filter.").format(number(total))
+    box.setText(text)
+    only = box.addButton(tr("Only the {} selected").format(number(selected)), compat.MB_ACCEPT_ROLE)
+    every_text = tr("All {} matching rows").format(number(total)) if total is not None else tr("All matching rows")
+    every = box.addButton(every_text, compat.MB_ACTION_ROLE)
+    box.addButton(compat.CANCEL_BUTTON)
+    box.setDefaultButton(only)
+    box.exec()
+    clicked = box.clickedButton()
+    return SELECTED if clicked is only else ALL if clicked is every else None
+
+
+def scope_label(count):
+    if count:
+        return tr("Add Layer ({} selected)…").format(count)
+    return tr("Add Layer (all matching)…")
+
+
+def cancel_task(task):
+    """Cancel a running task. QGIS deletes the C++ side of a task once it
+    finishes, so a finished one raises RuntimeError: nothing to cancel."""
+    if task is None:
+        return
+    try:
+        if not task.isCanceled():
+            task.cancel()
+    except RuntimeError:
+        pass
+
+
+class ResultsTable(QTableWidget):
+    """Read-only grid of query results: click a header to sort, filter rows
+    with apply_filter(); raw_row() gives back the untruncated values."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.headers, self.rows = [], []
+        self.setEditTriggers(compat.NO_EDIT_TRIGGERS)
+        self.setSelectionBehavior(compat.SELECT_ROWS)
+        self.setSelectionMode(compat.EXTENDED_SELECTION)
+        self.setContextMenuPolicy(compat.ACTIONS_CONTEXT_MENU)
+
+    def set_result(self, headers, rows):
+        self.setSortingEnabled(False)
+        self.clear()
+        self.headers, self.rows = list(headers), list(rows)
+        self.setColumnCount(len(headers))
+        self.setRowCount(len(rows))
+        self.setHorizontalHeaderLabels(self.headers)
+        for r, row in enumerate(rows):
+            for c, value in enumerate(row):
+                item = QTableWidgetItem()
+                if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+                    item.setData(compat.DISPLAY_ROLE, float(value) if isinstance(value, Decimal) else value)
+                else:
+                    item.setText(display(value))
+                if value is not None and len(str(value)) > CELL_CHARS and not sql.looks_like_wkb(value):
+                    item.setToolTip(str(value)[:2000])
+                item.setData(compat.USER_ROLE, r)
+                self.setItem(r, c, item)
+        self.resizeColumnsToContents()
+        for c in range(self.columnCount()):
+            self.setColumnWidth(c, min(self.columnWidth(c), 320))
+        self.horizontalHeader().setSortIndicator(-1, compat.ASCENDING)  # keep server order
+        self.setSortingEnabled(True)
+
+    def raw_row(self, item):
+        return self.rows[item.data(compat.USER_ROLE)]
+
+    def selected_rows(self):
+        """Raw values of the selected, visible rows, in grid order."""
+        rows = sorted({item.row() for item in self.selectedItems()})
+        return [self.raw_row(self.item(r, 0)) for r in rows if not self.isRowHidden(r) and self.item(r, 0)]
+
+    def add_map_action(self, callback):
+        """"Show selected on map" button and context-menu entry."""
+        action = QAction(tr("Show Selected on Map"), self)
+        action.triggered.connect(callback)
+        self.addAction(action)
+        button = QPushButton(tr("Show Selected on Map"))
+        button.setAutoDefault(False)
+        button.setToolTip(tr("Select rows with Ctrl/Shift+click or Ctrl+A"))
+        button.clicked.connect(callback)
+        return button
+
+    def apply_filter(self, text, column=-1):
+        """Hide rows whose cells (or the given column) do not contain text."""
+        text = (text or "").lower()
+        shown = 0
+        for r in range(self.rowCount()):
+            columns = range(self.columnCount()) if column < 0 else [column]
+            hit = not text or any(
+                self.item(r, c) is not None and text in self.item(r, c).text().lower() for c in columns
+            )
+            self.setRowHidden(r, not hit)
+            shown += hit
+        return shown
+
+
+class FilterBar(QWidget):
+    """Quick filter over the rows already shown (no new query)."""
+
+    ALL = tr("All columns")
+
+    def __init__(self, table, parent=None):
+        super().__init__(parent)
+        self.table = table
+        self.text = QLineEdit()
+        self.text.setPlaceholderText(tr("Filter shown rows…"))
+        self.text.setClearButtonEnabled(True)
+        self.column = QComboBox()
+        self.column.addItem(self.ALL)
+        self.text.textChanged.connect(self.apply)
+        self.column.currentIndexChanged.connect(self.apply)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.text, 1)
+        layout.addWidget(self.column)
+
+    def set_columns(self, headers):
+        current = self.column.currentText()
+        self.column.blockSignals(True)
+        self.column.clear()
+        self.column.addItem(self.ALL)
+        self.column.addItems(list(headers))
+        if current in headers:
+            self.column.setCurrentText(current)
+        self.column.blockSignals(False)
+        self.apply()
+
+    def apply(self, *args):
+        return self.table.apply_filter(self.text.text(), self.column.currentIndex() - 1)
+
+
+class PreviewDialog(QDialog):
+    """First rows of a table, optionally filtered on the server, without
+    creating a layer. Double click a row to see it on the map."""
+
+    def __init__(self, controller, conn, source, parent=None, where=""):
+        super().__init__(parent)
+        self.controller = controller
+        self.conn = conn
+        self.source = source
+        self.serial = 0  # only the latest query may fill the grid
+        self.task = None
+        self.done = False
+        self.map_note = ""
+        self.total = None
+        self.setWindowTitle(tr("Preview {}").format(sources.label(source)))
+        self.setWindowIcon(icon())
+        self.resize(900, 520)
+
+        self.where = QLineEdit()
+        self.where.setPlaceholderText(tr("SQL filter on the whole table, e.g. region = 'north'"))
+        self.where.returnPressed.connect(self.run)
+        self.where.setText(where or "")
+        self.limit = QSpinBox()
+        self.limit.setRange(1, 10_000)
+        self.limit.setValue(sql.PREVIEW_ROWS)
+        apply = QPushButton(tr("Apply"))
+        apply.setAutoDefault(False)  # Enter already runs the query via returnPressed
+        apply.clicked.connect(self.run)
+        self.filter_map = QCheckBox(tr("Also filter this table's layers on the map"))
+        self.filter_map.setChecked(True)
+        top = QHBoxLayout()
+        top.addWidget(QLabel(tr("WHERE")))
+        top.addWidget(self.where, 1)
+        top.addWidget(QLabel(tr("Rows")))
+        top.addWidget(self.limit)
+        top.addWidget(apply)
+
+        self.status = QLabel()
+        self.table = ResultsTable()
+        self.table.itemDoubleClicked.connect(self.show_on_map)
+        self.table.itemSelectionChanged.connect(
+            lambda: self.add_button.setText(scope_label(len(self.table.selected_rows())))
+        )
+        self.filter = FilterBar(self.table)
+        hint = tr("Double-click a row to show it on the map, or select several rows and click "
+                  "'Show Selected on Map'.") if source["column"] else ""
+        buttons = QDialogButtonBox(compat.CLOSE)
+        buttons.rejected.connect(self.reject)
+        if source["column"]:
+            buttons.addButton(self.table.add_map_action(self.show_selected_on_map), compat.ACTION_ROLE)
+            clear = buttons.addButton(tr("Clear Records"), compat.ACTION_ROLE)
+            clear.setAutoDefault(False)
+            clear.setToolTip(tr("Empty the temporary \"(records)\" layer of this table"))
+            clear.clicked.connect(self.clear_records)
+        add = buttons.addButton(scope_label(0), compat.ACTION_ROLE)
+        add.setAutoDefault(False)
+        add.setToolTip(tr("With rows selected: only those rows, or every row matching the WHERE"))
+        add.clicked.connect(self.add_layer)
+        self.add_button = add
+        self.table.itemSelectionChanged.connect(
+            lambda: self.add_button.setText(scope_label(len(self.table.selected_rows())))
+        )
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(top)
+        layout.addWidget(self.filter_map)
+        layout.addWidget(self.filter)
+        layout.addWidget(self.status)
+        layout.addWidget(self.table, 1)
+        layout.addWidget(QLabel(hint))
+        layout.addWidget(buttons)
+        self.run()
+
+    def run(self):
+        cancel_task(self.task)
+        self.task = None
+        self.done = False
+        query = sql.preview_query(
+            sql.table_ref(self.source["schema"], self.source["table"]), self.limit.value(), self.where.text()
+        )
+        self.status.setText(tr("Running…"))
+        self.map_note = self.filter_on_map()
+        self.serial += 1
+        serial = self.serial
+
+        def latest_only(task, ok):
+            if serial == self.serial:
+                self.show_result(task, ok)
+
+        count = sql.count_query(
+            sql.table_ref(self.source["schema"], self.source["table"]), None, self.where.text()
+        )
+        task = self.controller.run_query(
+            self.conn, query, sources.label(self.source), latest_only, self, count_query=count
+        )
+        if task is None:
+            self.status.setText(tr("Canceled."))
+        elif not self.done:  # the result may already be here
+            self.task = task
+
+    def show_result(self, task, ok):
+        self.done = True
+        self.task = None
+        if ok:
+            self.table.set_result(task.headers, task.rows)
+            self.filter.set_columns(task.headers)
+            self.total = task.total
+            self.status.setText(shown_text(len(task.rows), task.total) + self.map_note)
+            set_error(self.status, False)
+        else:
+            # Never leave the previous rows on screen: they look like an
+            # unfiltered result.
+            self.table.set_result([], [])
+            self.status.setText(failure_text(task))
+            set_error(self.status, bool(task.error))
+
+    def filter_on_map(self):
+        """Apply the WHERE to the layers loaded from this table; returns a
+        note for the status line."""
+        if not self.filter_map.isChecked():
+            return ""
+        where = sql.clean_filter(self.where.text())
+        done, failed = self.controller.filter_layers(sources.label(self.source), where)
+        note = ""
+        if done:
+            note += tr(" Map: {} layer(s) filtered.").format(len(done)) if where else tr(" Map: filter removed from {} layer(s).").format(len(done))
+        if failed:
+            note += tr(" Map: {} layer(s) did not accept this filter (use simple SQL).").format(len(failed))
+        return note
+
+    def show_on_map(self, item):
+        if not self.source["column"]:
+            self.status.setText(tr("This table has no geometry."))
+            return
+        self.controller.show_record(
+            sources.label(self.source), self.table.headers, self.table.raw_row(item), self.source["column"]
+        )
+
+    def show_selected_on_map(self):
+        rows = self.table.selected_rows()
+        if not rows:
+            self.status.setText(tr("Select one or more rows first."))
+            return
+        self.controller.show_records(sources.label(self.source), self.table.headers, rows, self.source["column"])
+
+    def clear_records(self):
+        removed = self.controller.clear_records(sources.label(self.source))
+        self.status.setText(tr("{} record(s) removed from the map.").format(removed))
+
+    def add_layer(self):
+        """Only the selected rows (saved from the preview), or every row
+        matching the current WHERE (loaded again, with the usual options)."""
+        selected = self.table.selected_rows()
+        scope = choose_scope(self, len(selected), self.total)
+        if scope == SELECTED:
+            self.controller.save_rows(
+                sources.label(self.source), self.table.headers, selected, self.source["column"]
+            )
+        elif scope == ALL:
+            dlg = LoadOptionsDialog(self.source, self, where=sql.clean_filter(self.where.text()),
+                                    controller=self.controller, conn=self.conn)
+            if dlg.exec():
+                self.controller.load(self.conn, self.source, dlg.form.options(), self)
+
+    def reject(self):
+        cancel_task(self.task)
+        self.task = None
+        super().reject()
+
+
+def open_preview(controller, conn, source, parent=None, where=None):
+    """One preview window per connection and table: opening it again
+    brings the existing window back (with the new filter, if one is given)
+    instead of stacking identical windows."""
+    key = (conn["name"], sources.label(source))
+    dlg = controller.previews.get(key)
+    try:
+        alive = dlg is not None and dlg.isVisible() is not None
+    except RuntimeError:  # deleted with its parent window
+        alive = False
+    if not alive:
+        dlg = PreviewDialog(controller, conn, source, parent, where=where or "")
+        controller.previews[key] = dlg
+    elif where is not None and where != dlg.where.text():
+        dlg.where.setText(where)
+        dlg.run()
+    dlg.show()
+    dlg.raise_()
+    dlg.activateWindow()
+    return dlg
+
+
+class SqlDialog(QDialog):
+    """Run any SELECT, look at the first rows and load the result as a
+    layer (or a table, without geometry). The query always runs wrapped as a
+    subquery, so statements that change data cannot run."""
+
+    NO_GEOMETRY = tr("(no geometry)")
+
+    def __init__(self, controller, conn_name=None, parent=None, origin=None):
+        super().__init__(parent)
+        self.controller = controller
+        self.task = None
+        self.total = None
+        self.origin = origin  # editing a loaded layer: what it was loaded from
+        self.setWindowTitle(tr("Redshift Spatial — SQL"))
+        self.setWindowIcon(icon())
+        self.resize(960, 720)
+
+        self.conn_combo = QComboBox()
+        self.conn_combo.addItems(connections.names())
+        if conn_name:
+            self.conn_combo.setCurrentText(conn_name)
+
+        self.editor = QPlainTextEdit()
+        self.editor.setFont(QFontDatabase.systemFont(compat.FIXED_FONT))
+        self.editor.setPlaceholderText("SELECT id, name, geom\nFROM analytics.parcels\nWHERE region = 'north'")
+        self.run_button = QPushButton(tr("Execute"))
+        self.run_button.setShortcut(QKeySequence("Ctrl+Return"))
+        self.run_button.setToolTip("Ctrl+Enter")
+        self.run_button.clicked.connect(self.execute)
+        self.cancel_button = QPushButton(tr("Cancel"))
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.cancel)
+        self.status = QLabel(tr("Only SELECT queries; the first {} rows are shown.").format(sql.SQL_PREVIEW_ROWS))
+        self.table = ResultsTable()
+        self.table.itemDoubleClicked.connect(self.show_on_map)
+        self.table.itemSelectionChanged.connect(
+            lambda: self.add_button.setText(scope_label(len(self.table.selected_rows())))
+        )
+        self.filter = FilterBar(self.table)
+
+        self.geometry = QComboBox()
+        self.geometry.addItem(self.NO_GEOMETRY)
+        self.layer_name = QLineEdit("query")
+        self.form = OptionsForm()
+        load = QPushButton(scope_label(0))
+        load.clicked.connect(self.load)
+        self.add_button = load
+        self.replace_box = replace_box(origin is not None)
+
+        top = QHBoxLayout()
+        top.addWidget(QLabel(tr("Connection")))
+        top.addWidget(self.conn_combo, 1)
+        top.addWidget(self.run_button)
+        top.addWidget(self.cancel_button)
+
+        load_form = QFormLayout()
+        load_form.addRow(tr("Geometry column"), self.geometry)
+        load_form.addRow(tr("Layer name"), self.layer_name)
+        bottom = QWidget()
+        bottom_layout = QVBoxLayout(bottom)
+        bottom_layout.addWidget(self.status)
+        bottom_layout.addWidget(self.filter)
+        bottom_layout.addWidget(self.table, 1)
+        map_row = QHBoxLayout()
+        map_row.addWidget(QLabel(tr("Double-click a row to show it on the map, or select several rows:")), 1)
+        map_row.addWidget(self.table.add_map_action(self.show_selected_on_map))
+        clear = QPushButton(tr("Clear Records"))
+        clear.setAutoDefault(False)
+        clear.clicked.connect(self.clear_records)
+        map_row.addWidget(clear)
+        bottom_layout.addLayout(map_row)
+        bottom_layout.addLayout(load_form)
+        bottom_layout.addWidget(self.form)
+        bottom_layout.addWidget(self.replace_box)
+        bottom_layout.addWidget(load)
+
+        splitter = QSplitter()
+        splitter.setOrientation(compat.VERTICAL)
+        splitter.addWidget(self.editor)
+        splitter.addWidget(bottom)
+        splitter.setStretchFactor(1, 2)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(top)
+        layout.addWidget(splitter, 1)
+        if origin is not None:
+            source = origin["source"]
+            self.setWindowTitle(tr("Redshift Spatial — Edit {}").format(source["name"]))
+            self.editor.setPlainText(source["sql"])
+            self.layer_name.setText(source["name"])
+            if source["column"]:
+                self.geometry.addItem(source["column"])
+                self.geometry.setCurrentText(source["column"])
+            self.form.set_options(origin)
+
+    def connection(self):
+        name = self.conn_combo.currentText()
+        if not name:
+            QMessageBox.information(self, tr("No connection"), tr("Create a connection first."))
+            return None
+        return connections.load(name)
+
+    def query_text(self):
+        try:
+            return sql.clean_query(self.editor.toPlainText())
+        except ValueError:
+            QMessageBox.information(self, tr("Empty query"), tr("Write a SELECT first."))
+            return None
+
+    def execute(self):
+        conn, text = self.connection(), self.query_text()
+        if conn is None or text is None:
+            return
+        preview = sql.preview_query(sql.query_from(text), sql.SQL_PREVIEW_ROWS)
+        self.status.setText(tr("Running…"))
+        self.run_button.setEnabled(False)
+        self.done = False
+        count = sql.count_query(sql.query_from(text))
+        task = self.controller.run_query(conn, preview, "SQL", self.show_result, self, count_query=count)
+        if task is None:
+            self.run_button.setEnabled(True)
+            self.status.setText(tr("Canceled."))
+        elif not self.done:  # the result may already be here
+            self.task = task
+            self.cancel_button.setEnabled(True)
+
+    def cancel(self):
+        cancel_task(self.task)
+
+    def show_result(self, task, ok):
+        self.done = True
+        self.task = None
+        self.run_button.setEnabled(True)
+        self.cancel_button.setEnabled(False)
+        if not ok:
+            self.table.set_result([], [])
+            self.status.setText(failure_text(task))
+            set_error(self.status, bool(task.error))
+            return
+        set_error(self.status, False)
+        self.table.set_result(task.headers, task.rows)
+        self.filter.set_columns(task.headers)
+        self.total = task.total
+        self.status.setText(shown_text(len(task.rows), task.total))
+        previous = self.geometry.currentText()
+        self.geometry.clear()
+        self.geometry.addItem(self.NO_GEOMETRY)
+        self.geometry.addItems(list(task.headers))
+        guess = guess_geometry_column(task.headers, task.rows)
+        if previous in task.headers:
+            self.geometry.setCurrentText(previous)
+        elif guess:
+            self.geometry.setCurrentText(guess)
+
+    def show_on_map(self, item):
+        column = self.geometry.currentText()
+        if column == self.NO_GEOMETRY:
+            self.status.setText(tr("Choose the geometry column first."))
+            return
+        name = self.layer_name.text().strip() or "query"
+        self.controller.show_record(name, self.table.headers, self.table.raw_row(item), column)
+
+    def show_selected_on_map(self):
+        column = self.geometry.currentText()
+        if column == self.NO_GEOMETRY:
+            self.status.setText(tr("Choose the geometry column first."))
+            return
+        rows = self.table.selected_rows()
+        if not rows:
+            self.status.setText(tr("Select one or more rows first."))
+            return
+        name = self.layer_name.text().strip() or "query"
+        self.controller.show_records(name, self.table.headers, rows, column)
+
+    def clear_records(self):
+        removed = self.controller.clear_records(self.layer_name.text().strip() or "query")
+        self.status.setText(tr("{} record(s) removed from the map.").format(removed))
+
+    def load(self):
+        conn, text = self.connection(), self.query_text()
+        if conn is None or text is None:
+            return
+        column = self.geometry.currentText()
+        column = None if column == self.NO_GEOMETRY else column
+        name = self.layer_name.text().strip() or "query"
+        selected = self.table.selected_rows()
+        scope = choose_scope(self, len(selected), self.total)
+        if scope == SELECTED:
+            self.controller.save_rows(name, self.table.headers, selected, column)
+        elif scope == ALL:
+            replace = self.origin["load_id"] if self.origin and self.replace_box.isChecked() else None
+            self.controller.load(conn, sources.query(text, column, name), self.form.options(), self,
+                                 replace=replace)
+
+    def reject(self):
+        self.cancel()
+        super().reject()
+
+
+def guess_geometry_column(headers, rows):
+    """First column whose values look like WKB in the preview."""
+    for c, name in enumerate(headers):
+        values = [row[c] for row in rows if row[c] is not None]
+        if values and all(sql.looks_like_wkb(v) for v in values[:20]):
+            return name
+    return None
+
+
+# Add layer window -----------------------------------------------------------------
 
 
 class LoadLayerDialog(QDialog):
@@ -225,6 +939,10 @@ class LoadLayerDialog(QDialog):
         self.form = OptionsForm()
 
         buttons = QDialogButtonBox(compat.CLOSE)
+        btn_preview = buttons.addButton(tr("Preview Rows"), compat.ACTION_ROLE)
+        btn_preview.clicked.connect(lambda: self.preview(self.tree.currentItem()))
+        btn_sql = buttons.addButton(tr("SQL…"), compat.ACTION_ROLE)
+        btn_sql.clicked.connect(self.open_sql)
         btn_load = buttons.addButton(tr("Add Layer"), compat.ACCEPT_ROLE)
         btn_load.clicked.connect(lambda: self.load(self.tree.currentItem()))
         buttons.rejected.connect(self.reject)
@@ -279,24 +997,23 @@ class LoadLayerDialog(QDialog):
             return
         try:
             with WaitCursor():
-                rows = db.list_spatial_columns(params)
+                rows = db.list_tables(params, conn["list_all_tables"])
         except Exception as e:
             QMessageBox.critical(self, tr("Connection failed"), str(e))
             return
         self.tree.clear()
         schemas = {}
-        for schema, table, column, data_type in rows:
+        for row in rows:
+            schema, table, column, data_type = row
             parent = schemas.get(schema)
             if parent is None:
                 parent = schemas[schema] = QTreeWidgetItem(self.tree, [schema])
-            item = QTreeWidgetItem(parent, [table, column, data_type])
-            item.setData(0, compat.USER_ROLE, (schema, table, column, data_type))
+            item = QTreeWidgetItem(parent, [table, column or "", data_type or tr("no geometry")])
+            item.setData(0, compat.USER_ROLE, sources.from_row(row))
         self.tree.expandAll()
         self.tree.resizeColumnToContents(0)
         if not rows:
-            QMessageBox.information(
-                self, tr("No spatial tables"), tr("No GEOMETRY or GEOGRAPHY column is visible to this user.")
-            )
+            QMessageBox.information(self, tr("No tables"), tr("No table is visible to this user."))
         self.filter_tree(self.search.text())
 
     def filter_tree(self, text):
@@ -311,11 +1028,23 @@ class LoadLayerDialog(QDialog):
                 visible += hit
             parent.setHidden(visible == 0)
 
-    def load(self, item):
+    def selected_source(self, item):
         source = item.data(0, compat.USER_ROLE) if item else None
         if not source:
             QMessageBox.information(self, tr("Choose a table"), tr("Select a table in the list."))
-            return
-        conn = self.current_connection()
+        return source
+
+    def load(self, item):
+        source = self.selected_source(item)
+        conn = self.current_connection() if source else None
         if conn is not None:
             self.controller.load(conn, source, self.form.options(), self)
+
+    def preview(self, item):
+        source = self.selected_source(item)
+        conn = self.current_connection() if source else None
+        if conn is not None:
+            open_preview(self.controller, conn, source, self, where=self.form.where.text())
+
+    def open_sql(self):
+        SqlDialog(self.controller, self.conn_combo.currentText(), self).show()
