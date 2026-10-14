@@ -253,3 +253,36 @@ def test_browser_lists_plain_tables_and_columns():
         assert "Preview Rows…" in [a.text() for a in lookup.actions(None)]
     finally:
         connections.names, connections.load, db.list_tables, db.list_columns = original
+
+
+def test_closing_dialogs_after_the_task_was_deleted():
+    """QGIS deletes a finished task's C++ object; closing the preview or the
+    SQL window afterwards must not raise."""
+    from qgis.PyQt import sip
+
+    task = loader.QueryTask({}, "SELECT 1", "x", lambda *a: None)
+    sip.delete(task)
+    dialog.cancel_task(task)  # no RuntimeError
+    dialog.cancel_task(None)
+
+    fake = FakeRedshift([("id", "integer")], [(1,)])
+    ctl = SyncController(fake)
+    preview = dialog.PreviewDialog(ctl, CONN, sources.table("s", "t"))
+    assert preview.task is None  # cleared when the result arrived
+    stale = loader.QueryTask({}, "SELECT 1", "x", lambda *a: None)
+    sip.delete(stale)
+    preview.task = stale
+    preview.reject()
+
+    original = connections.names, connections.load
+    connections.names = lambda: ["cluster"]
+    connections.load = lambda name: dict(CONN, name=name)
+    try:
+        window = dialog.SqlDialog(ctl, "cluster")
+        window.editor.setPlainText("SELECT 1")
+        window.execute()
+        assert window.task is None and not window.cancel_button.isEnabled()
+        window.task = stale
+        window.reject()
+    finally:
+        connections.names, connections.load = original

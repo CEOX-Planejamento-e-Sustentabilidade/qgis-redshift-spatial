@@ -218,6 +218,18 @@ def display(value):
     return text if len(text) <= CELL_CHARS else text[:CELL_CHARS] + "…"
 
 
+def cancel_task(task):
+    """Cancel a running task. QGIS deletes the C++ side of a task once it
+    finishes, so a finished one raises RuntimeError: nothing to cancel."""
+    if task is None:
+        return
+    try:
+        if not task.isCanceled():
+            task.cancel()
+    except RuntimeError:
+        pass
+
+
 class ResultsTable(QTableWidget):
     def set_result(self, headers, rows):
         self.clear()
@@ -254,11 +266,16 @@ class PreviewDialog(QDialog):
         layout.addWidget(self.table, 1)
         layout.addWidget(buttons)
         query = sql.preview_query(sql.table_ref(source["schema"], source["table"]))
-        self.task = controller.run_query(conn, query, sources.label(source), self.show_result, self)
-        if self.task is None:
+        self.done = False
+        task = controller.run_query(conn, query, sources.label(source), self.show_result, self)
+        if task is None:
             self.status.setText(tr("Canceled."))
+        elif not self.done:  # the result may already be here
+            self.task = task
 
     def show_result(self, task, ok):
+        self.done = True
+        self.task = None
         if ok:
             self.table.set_result(task.headers, task.rows)
             self.status.setText(tr("First {} rows.").format(len(task.rows)))
@@ -266,8 +283,8 @@ class PreviewDialog(QDialog):
             self.status.setText(str(task.error) if task.error else tr("Canceled."))
 
     def reject(self):
-        if self.task is not None and not self.task.isCanceled():
-            self.task.cancel()
+        cancel_task(self.task)
+        self.task = None
         super().reject()
 
 
@@ -359,18 +376,20 @@ class SqlDialog(QDialog):
         preview = sql.preview_query(sql.query_from(text), sql.SQL_PREVIEW_ROWS)
         self.status.setText(tr("Running…"))
         self.run_button.setEnabled(False)
-        self.task = self.controller.run_query(conn, preview, "SQL", self.show_result, self)
-        if self.task is None:
+        self.done = False
+        task = self.controller.run_query(conn, preview, "SQL", self.show_result, self)
+        if task is None:
             self.run_button.setEnabled(True)
             self.status.setText(tr("Canceled."))
-        else:
+        elif not self.done:  # the result may already be here
+            self.task = task
             self.cancel_button.setEnabled(True)
 
     def cancel(self):
-        if self.task is not None:
-            self.task.cancel()
+        cancel_task(self.task)
 
     def show_result(self, task, ok):
+        self.done = True
         self.task = None
         self.run_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
