@@ -284,6 +284,20 @@ class Controller:
         for layer, fids in shown:
             canvas.flashFeatureIds(layer, fids)
 
+    def clear_records(self, label):
+        """Empty the "(records)" layers of a source, keeping the layers and
+        their style. Returns how many features were removed."""
+        removed = 0
+        for key, layer_id in list(self.record_layers.items()):
+            layer = QgsProject.instance().mapLayer(layer_id)
+            if key[0] != label or layer is None:
+                continue
+            removed += layer.featureCount()
+            layer.dataProvider().truncate()
+            layer.updateExtents()
+            layer.triggerRepaint()
+        return removed
+
     def _record_layer(self, label, headers, geometry_index, wkb_type, crs):
         type_name = QgsWkbTypes.displayString(wkb_type)
         key = (label, type_name, crs.authid(), tuple(headers))

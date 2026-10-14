@@ -31,8 +31,9 @@ GeoPackage that QGIS opens natively.
   quick filter over the rows shown (all columns or one), sortable columns,
   and **double click on a row (or select several and click *Show Selected on
   Map*) to see them on the map** (a temporary
-  "(records)" layer, the row selected and zoomed to). The same works in the
-  SQL window.
+  "(records)" layer, the row selected and zoomed to; *Clear Records* empties
+  it). *Add Layer…* loads every row matching the preview's WHERE. The same
+  works in the SQL window.
 - **Tables without geometry** (optional, per connection: *Also list tables
   without geometry*) load as attribute tables, e.g. to join with a layer.
 - Saved connections; passwords live only in the QGIS authentication database

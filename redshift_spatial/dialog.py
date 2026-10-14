@@ -191,11 +191,12 @@ class OptionsForm(QWidget):
 class LoadOptionsDialog(QDialog):
     """Asked from the Browser panel ("Add Layer with Filter…")."""
 
-    def __init__(self, source, parent=None):
+    def __init__(self, source, parent=None, where=""):
         super().__init__(parent)
         self.setWindowTitle(tr("Add {}").format(sources.label(source)))
         self.setWindowIcon(icon())
         self.form = OptionsForm(with_crs=bool(source["column"]))
+        self.form.where.setText(where or "")
         buttons = QDialogButtonBox(compat.CANCEL)
         buttons.addButton(tr("Add Layer"), compat.ACCEPT_ROLE)
         buttons.accepted.connect(self.accept)
@@ -394,6 +395,14 @@ class PreviewDialog(QDialog):
         buttons.rejected.connect(self.reject)
         if source["column"]:
             buttons.addButton(self.table.add_map_action(self.show_selected_on_map), compat.ACTION_ROLE)
+            clear = buttons.addButton(tr("Clear Records"), compat.ACTION_ROLE)
+            clear.setAutoDefault(False)
+            clear.setToolTip(tr("Empty the temporary \"(records)\" layer of this table"))
+            clear.clicked.connect(self.clear_records)
+        add = buttons.addButton(tr("Add Layer…"), compat.ACTION_ROLE)
+        add.setAutoDefault(False)
+        add.setToolTip(tr("Load every row that matches the WHERE above, not only the rows shown"))
+        add.clicked.connect(self.add_layer)
 
         layout = QVBoxLayout(self)
         layout.addLayout(top)
@@ -470,6 +479,16 @@ class PreviewDialog(QDialog):
             self.status.setText(tr("Select one or more rows first."))
             return
         self.controller.show_records(sources.label(self.source), self.table.headers, rows, self.source["column"])
+
+    def clear_records(self):
+        removed = self.controller.clear_records(sources.label(self.source))
+        self.status.setText(tr("{} record(s) removed from the map.").format(removed))
+
+    def add_layer(self):
+        """Load every row matching the current WHERE, with the usual options."""
+        dlg = LoadOptionsDialog(self.source, self, where=sql.clean_filter(self.where.text()))
+        if dlg.exec():
+            self.controller.load(self.conn, self.source, dlg.form.options(), self)
 
     def reject(self):
         cancel_task(self.task)
@@ -558,6 +577,10 @@ class SqlDialog(QDialog):
         map_row = QHBoxLayout()
         map_row.addWidget(QLabel(tr("Double-click a row to show it on the map, or select several rows:")), 1)
         map_row.addWidget(self.table.add_map_action(self.show_selected_on_map))
+        clear = QPushButton(tr("Clear Records"))
+        clear.setAutoDefault(False)
+        clear.clicked.connect(self.clear_records)
+        map_row.addWidget(clear)
         bottom_layout.addLayout(map_row)
         bottom_layout.addLayout(load_form)
         bottom_layout.addWidget(self.form)
@@ -649,6 +672,10 @@ class SqlDialog(QDialog):
             return
         name = self.layer_name.text().strip() or "query"
         self.controller.show_records(name, self.table.headers, rows, column)
+
+    def clear_records(self):
+        removed = self.controller.clear_records(self.layer_name.text().strip() or "query")
+        self.status.setText(tr("{} record(s) removed from the map.").format(removed))
 
     def load(self):
         conn, text = self.connection(), self.query_text()

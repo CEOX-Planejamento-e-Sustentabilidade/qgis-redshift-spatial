@@ -492,7 +492,7 @@ def test_close_button_closes_the_preview():
     dlg = dialog.open_preview(SyncController(fake), CONN, sources.table("s", "t"))
     assert dlg.isVisible()
     (box,) = dlg.findChildren(QDialogButtonBox)
-    (close,) = box.buttons()
+    (close,) = [b for b in box.buttons() if box.buttonRole(b) == compat.REJECT_ROLE]
     close.click()
     assert not dlg.isVisible()
 
@@ -565,3 +565,47 @@ def test_zoom_covers_rows_of_every_geometry_type():
     (layer, fids), = ctl.show_records("s.zoom", ["id", "shape"], rows[:1], "shape")
     assert ctl.iface.canvas.extent().contains(layer.getFeature(fids[0]).geometry().asPoint())
     QgsProject.instance().removeAllMapLayers()
+
+
+def test_clear_records_empties_only_that_sources_layers():
+    from qgis.core import QgsProject
+
+    ctl = Controller(None)
+    pts = [(1, ewkb_hex("POINT(1 1)", 4326)), (2, ewkb_hex("LINESTRING(0 0,1 1)", 4326))]
+    ctl.show_records("s.a", ["id", "shape"], pts, "shape")
+    ctl.show_records("s.b", ["id", "shape"], pts[:1], "shape")
+    assert ctl.clear_records("s.a") == 2
+    a_layers = QgsProject.instance().mapLayersByName("s.a (records)")
+    assert len(a_layers) == 2 and all(l.featureCount() == 0 for l in a_layers)  # layers kept
+    (b,) = QgsProject.instance().mapLayersByName("s.b (records)")
+    assert b.featureCount() == 1
+    ctl.show_records("s.a", ["id", "shape"], pts[:1], "shape")
+    assert sum(l.featureCount() for l in a_layers) == 1  # same layer reused after clearing
+    assert ctl.clear_records("nothing here") == 0
+    QgsProject.instance().removeAllMapLayers()
+
+
+def test_preview_add_layer_uses_the_current_where():
+    fake = FakeRedshift([("id", "integer"), ("shape", "geometry")], [(1, ewkb_hex("POINT(1 1)", 4326))])
+    ctl = SyncController(fake)
+    dlg = dialog.open_preview(ctl, CONN, sources.table("s", "addlayer", "shape"))
+    dlg.where.setText("WHERE id = 1;")
+    original = dialog.LoadOptionsDialog.exec
+    captured = {}
+
+    def accept(self):
+        captured["where"] = self.form.where.text()
+        return True
+
+    dialog.LoadOptionsDialog.exec = accept
+    try:
+        dlg.add_layer()
+    finally:
+        dialog.LoadOptionsDialog.exec = original
+    assert captured["where"] == "id = 1"
+    source, options = ctl.loads[-1]
+    assert source == sources.table("s", "addlayer", "shape") and options["where"] == "id = 1"
+
+    dlg.clear_records()
+    assert "record(s) removed" in dlg.status.text()
+    dlg.reject()
