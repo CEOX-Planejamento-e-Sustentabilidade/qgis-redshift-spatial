@@ -11,7 +11,7 @@ from qgis.core import Qgis, QgsTask, QgsVectorFileWriter, QgsWkbTypes
 from qgis.gui import QgsFileWidget
 from qgis.PyQt.QtCore import QMetaType, Qt, QVariant
 from qgis.PyQt.QtGui import QFontDatabase
-from qgis.PyQt.QtWidgets import QDialogButtonBox, QLineEdit, QMessageBox
+from qgis.PyQt.QtWidgets import QAbstractItemView, QDialogButtonBox, QLineEdit, QMessageBox
 
 try:  # Qt5 keeps QAction in QtWidgets, Qt6 moved it to QtGui
     from qgis.PyQt.QtWidgets import QAction
@@ -28,6 +28,7 @@ def _enum(owner, scope, name):
 
 # Qt
 USER_ROLE = _enum(Qt, "ItemDataRole", "UserRole")
+DISPLAY_ROLE = _enum(Qt, "ItemDataRole", "DisplayRole")
 WAIT_CURSOR = _enum(Qt, "CursorShape", "WaitCursor")
 UTC = _enum(Qt, "TimeSpec", "UTC")
 LOCAL_TIME = _enum(Qt, "TimeSpec", "LocalTime")
@@ -39,7 +40,10 @@ CLOSE = _enum(QDialogButtonBox, "StandardButton", "Close")
 ACCEPT_ROLE = _enum(QDialogButtonBox, "ButtonRole", "AcceptRole")
 ACTION_ROLE = _enum(QDialogButtonBox, "ButtonRole", "ActionRole")
 PASSWORD = _enum(QLineEdit, "EchoMode", "Password")
+NO_EDIT_TRIGGERS = _enum(QAbstractItemView, "EditTrigger", "NoEditTriggers")
+SELECT_ROWS = _enum(QAbstractItemView, "SelectionBehavior", "SelectRows")
 VERTICAL = _enum(Qt, "Orientation", "Vertical")
+ASCENDING = _enum(Qt, "SortOrder", "AscendingOrder")
 FIXED_FONT = _enum(QFontDatabase, "SystemFont", "FixedFont")
 
 # QGIS

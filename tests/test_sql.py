@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2026 CEOX Planejamento e Otimização
+import struct
+
 from redshift_spatial import sources, sql
 
 T = sql.table_ref("s", "t")
@@ -154,3 +156,51 @@ def test_sources():
     assert plain["column"] is None and plain["data_type"] is None
     q = sources.query("SELECT 1", None, "")
     assert q["name"] == "query" and sources.label(q) == "query"
+
+
+def _ewkb_point(x, y, srid=None, z=None, order="<"):
+    flags = 1 | (0x20000000 if srid else 0) | (0x80000000 if z is not None else 0)
+    data = bytes([1 if order == "<" else 0]) + struct.pack(order + "I", flags)
+    if srid:
+        data += struct.pack(order + "I", srid)
+    data += struct.pack(order + "dd", x, y)
+    if z is not None:
+        data += struct.pack(order + "d", z)
+    return data
+
+
+def test_ewkb_point_with_srid_becomes_iso():
+    wkb, srid = sql.ewkb_to_iso(_ewkb_point(1.5, -2.0, srid=4326).hex())
+    assert srid == 4326
+    assert wkb == bytes([1]) + struct.pack("<I", 1) + struct.pack("<dd", 1.5, -2.0)
+
+
+def test_ewkb_z_flag_and_big_endian():
+    wkb, srid = sql.ewkb_to_iso(_ewkb_point(1, 2, srid=4674, z=3, order=">"))
+    assert srid == 4674
+    assert wkb[0] == 0 and struct.unpack(">I", wkb[1:5])[0] == 1001
+    assert struct.unpack(">ddd", wkb[5:]) == (1.0, 2.0, 3.0)
+
+
+def test_ewkb_multipolygon_nested_parts():
+    ring = struct.pack("<I", 4) + struct.pack("<8d", 0, 0, 1, 0, 1, 1, 0, 0)
+    polygon = bytes([1]) + struct.pack("<I", 3) + struct.pack("<I", 1) + ring
+    multi = bytes([1]) + struct.pack("<I", 6 | 0x20000000) + struct.pack("<I", 4326) + struct.pack("<I", 2) + polygon + polygon
+    wkb, srid = sql.ewkb_to_iso(multi)
+    assert srid == 4326
+    assert wkb == bytes([1]) + struct.pack("<I", 6) + struct.pack("<I", 2) + polygon + polygon
+
+
+def test_iso_wkb_passes_through_and_garbage_fails():
+    iso = bytes([1]) + struct.pack("<I", 1001) + struct.pack("<ddd", 1, 2, 3)
+    assert sql.ewkb_to_iso(iso) == (iso, 0)
+    import pytest
+
+    for bad in ("02000000", "0101000000", "01ff00000000000000"):
+        with pytest.raises((ValueError, struct.error)):
+            sql.ewkb_to_iso(bad)
+
+
+def test_preview_query_with_filter():
+    assert sql.preview_query(T, 50, "a = 1") == 'SELECT * FROM "s"."t" WHERE (a = 1) LIMIT 50'
+    assert sql.preview_query(T, 50, " ") == 'SELECT * FROM "s"."t" LIMIT 50'

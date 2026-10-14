@@ -3,6 +3,8 @@
 """Dialogs: saved connections, load options, the "Add layer" window, row
 previews and the SQL window."""
 
+from decimal import Decimal
+
 from qgis.core import QgsCoordinateReferenceSystem
 from qgis.gui import QgsAuthConfigSelect, QgsFileWidget, QgsProjectionSelectionWidget
 from qgis.PyQt.QtGui import QCursor, QFontDatabase, QKeySequence
@@ -231,43 +233,147 @@ def cancel_task(task):
 
 
 class ResultsTable(QTableWidget):
+    """Read-only grid of query results: click a header to sort, filter rows
+    with apply_filter(); raw_row() gives back the untruncated values."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.headers, self.rows = [], []
+        self.setEditTriggers(compat.NO_EDIT_TRIGGERS)
+        self.setSelectionBehavior(compat.SELECT_ROWS)
+
     def set_result(self, headers, rows):
+        self.setSortingEnabled(False)
         self.clear()
+        self.headers, self.rows = list(headers), list(rows)
         self.setColumnCount(len(headers))
         self.setRowCount(len(rows))
-        self.setHorizontalHeaderLabels(list(headers))
+        self.setHorizontalHeaderLabels(self.headers)
         for r, row in enumerate(rows):
             for c, value in enumerate(row):
-                item = QTableWidgetItem(display(value))
+                item = QTableWidgetItem()
+                if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+                    item.setData(compat.DISPLAY_ROLE, float(value) if isinstance(value, Decimal) else value)
+                else:
+                    item.setText(display(value))
                 if value is not None and len(str(value)) > CELL_CHARS and not sql.looks_like_wkb(value):
                     item.setToolTip(str(value)[:2000])
+                item.setData(compat.USER_ROLE, r)
                 self.setItem(r, c, item)
         self.resizeColumnsToContents()
         for c in range(self.columnCount()):
             self.setColumnWidth(c, min(self.columnWidth(c), 320))
+        self.horizontalHeader().setSortIndicator(-1, compat.ASCENDING)  # keep server order
+        self.setSortingEnabled(True)
+
+    def raw_row(self, item):
+        return self.rows[item.data(compat.USER_ROLE)]
+
+    def apply_filter(self, text, column=-1):
+        """Hide rows whose cells (or the given column) do not contain text."""
+        text = (text or "").lower()
+        shown = 0
+        for r in range(self.rowCount()):
+            columns = range(self.columnCount()) if column < 0 else [column]
+            hit = not text or any(
+                self.item(r, c) is not None and text in self.item(r, c).text().lower() for c in columns
+            )
+            self.setRowHidden(r, not hit)
+            shown += hit
+        return shown
+
+
+class FilterBar(QWidget):
+    """Quick filter over the rows already shown (no new query)."""
+
+    ALL = tr("All columns")
+
+    def __init__(self, table, parent=None):
+        super().__init__(parent)
+        self.table = table
+        self.text = QLineEdit()
+        self.text.setPlaceholderText(tr("Filter shown rows…"))
+        self.text.setClearButtonEnabled(True)
+        self.column = QComboBox()
+        self.column.addItem(self.ALL)
+        self.text.textChanged.connect(self.apply)
+        self.column.currentIndexChanged.connect(self.apply)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.text, 1)
+        layout.addWidget(self.column)
+
+    def set_columns(self, headers):
+        current = self.column.currentText()
+        self.column.blockSignals(True)
+        self.column.clear()
+        self.column.addItem(self.ALL)
+        self.column.addItems(list(headers))
+        if current in headers:
+            self.column.setCurrentText(current)
+        self.column.blockSignals(False)
+        self.apply()
+
+    def apply(self, *args):
+        return self.table.apply_filter(self.text.text(), self.column.currentIndex() - 1)
 
 
 class PreviewDialog(QDialog):
-    """First rows of a table, without creating a layer."""
+    """First rows of a table, optionally filtered on the server, without
+    creating a layer. Double click a row to see it on the map."""
 
     def __init__(self, controller, conn, source, parent=None):
         super().__init__(parent)
         self.controller = controller
+        self.conn = conn
+        self.source = source
         self.task = None
+        self.done = False
         self.setWindowTitle(tr("Preview {}").format(sources.label(source)))
         self.setWindowIcon(icon())
-        self.resize(900, 480)
-        self.status = QLabel(tr("Running…"))
+        self.resize(900, 520)
+
+        self.where = QLineEdit()
+        self.where.setPlaceholderText(tr("SQL filter on the whole table, e.g. region = 'north'"))
+        self.where.returnPressed.connect(self.run)
+        self.limit = QSpinBox()
+        self.limit.setRange(1, 10_000)
+        self.limit.setValue(sql.PREVIEW_ROWS)
+        apply = QPushButton(tr("Apply"))
+        apply.clicked.connect(self.run)
+        top = QHBoxLayout()
+        top.addWidget(QLabel(tr("WHERE")))
+        top.addWidget(self.where, 1)
+        top.addWidget(QLabel(tr("Rows")))
+        top.addWidget(self.limit)
+        top.addWidget(apply)
+
+        self.status = QLabel()
         self.table = ResultsTable()
+        self.table.itemDoubleClicked.connect(self.show_on_map)
+        self.filter = FilterBar(self.table)
+        hint = tr("Double-click a row to show it on the map.") if source["column"] else ""
         buttons = QDialogButtonBox(compat.CLOSE)
         buttons.rejected.connect(self.reject)
+
         layout = QVBoxLayout(self)
+        layout.addLayout(top)
+        layout.addWidget(self.filter)
         layout.addWidget(self.status)
         layout.addWidget(self.table, 1)
+        layout.addWidget(QLabel(hint))
         layout.addWidget(buttons)
-        query = sql.preview_query(sql.table_ref(source["schema"], source["table"]))
+        self.run()
+
+    def run(self):
+        cancel_task(self.task)
+        self.task = None
         self.done = False
-        task = controller.run_query(conn, query, sources.label(source), self.show_result, self)
+        query = sql.preview_query(
+            sql.table_ref(self.source["schema"], self.source["table"]), self.limit.value(), self.where.text()
+        )
+        self.status.setText(tr("Running…"))
+        task = self.controller.run_query(self.conn, query, sources.label(self.source), self.show_result, self)
         if task is None:
             self.status.setText(tr("Canceled."))
         elif not self.done:  # the result may already be here
@@ -278,9 +384,18 @@ class PreviewDialog(QDialog):
         self.task = None
         if ok:
             self.table.set_result(task.headers, task.rows)
-            self.status.setText(tr("First {} rows.").format(len(task.rows)))
+            self.filter.set_columns(task.headers)
+            self.status.setText(tr("{} rows.").format(len(task.rows)))
         else:
-            self.status.setText(str(task.error) if task.error else tr("Canceled."))
+            self.status.setText(str(task.error).strip() if task.error else tr("Canceled."))
+
+    def show_on_map(self, item):
+        if not self.source["column"]:
+            self.status.setText(tr("This table has no geometry."))
+            return
+        self.controller.show_record(
+            sources.label(self.source), self.table.headers, self.table.raw_row(item), self.source["column"]
+        )
 
     def reject(self):
         cancel_task(self.task)
@@ -320,6 +435,8 @@ class SqlDialog(QDialog):
         self.cancel_button.clicked.connect(self.cancel)
         self.status = QLabel(tr("Only SELECT queries; the first {} rows are shown.").format(sql.SQL_PREVIEW_ROWS))
         self.table = ResultsTable()
+        self.table.itemDoubleClicked.connect(self.show_on_map)
+        self.filter = FilterBar(self.table)
 
         self.geometry = QComboBox()
         self.geometry.addItem(self.NO_GEOMETRY)
@@ -340,7 +457,9 @@ class SqlDialog(QDialog):
         bottom = QWidget()
         bottom_layout = QVBoxLayout(bottom)
         bottom_layout.addWidget(self.status)
+        bottom_layout.addWidget(self.filter)
         bottom_layout.addWidget(self.table, 1)
+        bottom_layout.addWidget(QLabel(tr("Double-click a row to show it on the map.")))
         bottom_layout.addLayout(load_form)
         bottom_layout.addWidget(self.form)
         bottom_layout.addWidget(load)
@@ -397,6 +516,7 @@ class SqlDialog(QDialog):
             self.status.setText(str(task.error).strip() if task.error else tr("Canceled."))
             return
         self.table.set_result(task.headers, task.rows)
+        self.filter.set_columns(task.headers)
         self.status.setText(tr("{} rows shown (at most {}).").format(len(task.rows), sql.SQL_PREVIEW_ROWS))
         previous = self.geometry.currentText()
         self.geometry.clear()
@@ -407,6 +527,14 @@ class SqlDialog(QDialog):
             self.geometry.setCurrentText(previous)
         elif guess:
             self.geometry.setCurrentText(guess)
+
+    def show_on_map(self, item):
+        column = self.geometry.currentText()
+        if column == self.NO_GEOMETRY:
+            self.status.setText(tr("Choose the geometry column first."))
+            return
+        name = self.layer_name.text().strip() or "query"
+        self.controller.show_record(name, self.table.headers, self.table.raw_row(item), column)
 
     def load(self):
         conn, text = self.connection(), self.query_text()

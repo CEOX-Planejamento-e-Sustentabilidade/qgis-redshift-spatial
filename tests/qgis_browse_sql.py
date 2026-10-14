@@ -286,3 +286,99 @@ def test_closing_dialogs_after_the_task_was_deleted():
         window.reject()
     finally:
         connections.names, connections.load = original
+
+
+# filters and records ------------------------------------------------------------------
+
+
+def ewkb_hex(wkt, srid):
+    """EWKB with an embedded SRID, the way Redshift prints GEOMETRY."""
+    import struct
+
+    from qgis.core import QgsGeometry
+
+    iso = bytes(QgsGeometry.fromWkt(wkt).asWkb())
+    (kind,) = struct.unpack("<I", iso[1:5])
+    return (iso[:1] + struct.pack("<II", kind | 0x20000000, srid) + iso[5:]).hex()
+
+
+def test_results_table_sorts_numbers_and_filters():
+    table = dialog.ResultsTable()
+    table.set_result(["id", "name"], [(10, "beta"), (9, "alpha"), (100, "Gamma")])
+    assert [table.item(r, 0).text() for r in range(3)] == ["10", "9", "100"]  # server order kept
+    table.sortItems(0, compat.ASCENDING)
+    assert [table.raw_row(table.item(r, 0))[0] for r in range(3)] == [9, 10, 100]  # numeric, not text
+    assert table.apply_filter("GAM") == 1
+    assert table.apply_filter("a", column=1) == 3
+    assert table.apply_filter("1", column=0) == 2
+    assert table.apply_filter("") == 3
+
+    bar = dialog.FilterBar(table)
+    bar.set_columns(["id", "name"])
+    bar.column.setCurrentText("name")
+    bar.text.setText("alp")
+    assert sum(not table.isRowHidden(r) for r in range(3)) == 1
+
+
+def test_preview_where_and_limit_rerun_on_the_server():
+    fake = FakeRedshift([("id", "integer")], [(i,) for i in range(5)])
+    ctl = SyncController(fake)
+    dlg = dialog.PreviewDialog(ctl, CONN, sources.table("s", "t"))
+    dlg.where.setText("id > 2")
+    dlg.limit.setValue(3)
+    dlg.run()
+    assert ctl.queries[-1] == 'SELECT * FROM "s"."t" WHERE (id > 2) LIMIT 3'
+    assert dlg.task is None and dlg.status.text() == "3 rows."
+
+
+def test_show_record_puts_the_row_on_the_map():
+    from qgis.core import QgsProject
+
+    ctl = Controller(None)
+    headers = ["id", "name", "shape"]
+    layer, fid = ctl.show_record("s.parcels", headers, (1, "a", ewkb_hex("POLYGON((0 0,1 0,1 1,0 0))", 4674)), "shape")
+    assert layer.crs().authid() == "EPSG:4674" and layer.featureCount() == 1
+    assert layer.selectedFeatureIds() == [fid]
+    assert [f.name() for f in layer.fields()] == ["id", "name"]
+    f = layer.getFeature(fid)
+    assert f["name"] == "a" and f.geometry().area() == 0.5
+    again, _ = ctl.show_record("s.parcels", headers, (2, "b", ewkb_hex("POLYGON((0 0,2 0,2 2,0 0))", 4674)), "shape")
+    assert again.id() == layer.id() and layer.featureCount() == 2
+    assert ctl.show_record("s.parcels", headers, (3, "c", None), "shape") is None
+    assert ctl.show_record("s.parcels", headers, (3, "c", "not a geometry"), "shape") is None
+    assert ctl.show_record("s.parcels", headers, (3, "c", None), "missing") is None
+    QgsProject.instance().removeAllMapLayers()
+
+
+def test_double_click_in_preview_and_sql_window():
+    from qgis.core import QgsProject
+
+    rows = [(1, ewkb_hex("POINT(5 6)", 4326)), (2, ewkb_hex("POINT(7 8)", 4326))]
+    fake = FakeRedshift([("id", "integer"), ("shape", "geometry")], rows,
+                        description=[("id", 23), ("shape", 3000)])
+    ctl = SyncController(fake)
+    preview = dialog.PreviewDialog(ctl, CONN, sources.table("s", "pts", "shape"))
+    preview.show_on_map(preview.table.item(1, 0))
+    (layer,) = QgsProject.instance().mapLayersByName("s.pts (records)")
+    assert next(layer.getFeatures()).geometry().asWkt() == "Point (7 8)"
+
+    plain = dialog.PreviewDialog(ctl, CONN, sources.table("s", "lookup"))
+    plain.show_on_map(plain.table.item(0, 0))
+    assert "no geometry" in plain.status.text()
+
+    original = connections.names, connections.load
+    connections.names = lambda: ["cluster"]
+    connections.load = lambda name: dict(CONN, name=name)
+    try:
+        window = dialog.SqlDialog(ctl, "cluster")
+        window.editor.setPlainText("SELECT id, shape FROM s.pts")
+        window.execute()
+        window.layer_name.setText("my pts")
+        window.show_on_map(window.table.item(0, 0))
+        assert QgsProject.instance().mapLayersByName("my pts (records)")
+        window.geometry.setCurrentText(dialog.SqlDialog.NO_GEOMETRY)
+        window.show_on_map(window.table.item(0, 0))
+        assert "geometry column" in window.status.text()
+    finally:
+        connections.names, connections.load = original
+        QgsProject.instance().removeAllMapLayers()

@@ -27,6 +27,11 @@ GeoPackage that QGIS opens natively.
   Spatial*): run any `SELECT`, see the first rows and add the result as a
   layer, picking the geometry column, or as a table without geometry.
   Queries always run wrapped as a subquery, so they cannot change data.
+- **Preview Rows…** with a `WHERE` filter that runs on the whole table, a
+  quick filter over the rows shown (all columns or one), sortable columns,
+  and **double click on a row to see it on the map** (a temporary
+  "(records)" layer, the row selected and zoomed to). The same works in the
+  SQL window.
 - **Tables without geometry** (optional, per connection: *Also list tables
   without geometry*) load as attribute tables, e.g. to join with a layer.
 - Saved connections; passwords live only in the QGIS authentication database

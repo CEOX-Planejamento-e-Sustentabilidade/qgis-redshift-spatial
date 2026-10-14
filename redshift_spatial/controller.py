@@ -6,12 +6,22 @@ starting loads and adding the finished layers to the project."""
 import os
 import tempfile
 
-from qgis.core import QgsApplication, QgsMessageLog, QgsProject, QgsVectorLayer
+from qgis.core import (
+    QgsApplication,
+    QgsCoordinateReferenceSystem,
+    QgsFeature,
+    QgsField,
+    QgsGeometry,
+    QgsMessageLog,
+    QgsProject,
+    QgsVectorLayer,
+    QgsWkbTypes,
+)
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QInputDialog, QMessageBox
 
-from . import compat, connections, sources
+from . import compat, connections, sources, sql
 from .loader import LoadTask, QueryTask
 
 LOG_TAG = "Redshift Spatial"
@@ -46,6 +56,7 @@ class Controller:
         self.iface = iface
         self.tasks = []  # keep Python references while QGIS runs them
         self.passwords = {}  # session only, never written to disk
+        self.record_layers = {}  # (label, geometry type, crs, headers) -> layer id
 
     def parent_window(self):
         return self.iface.mainWindow() if self.iface is not None else None
@@ -183,6 +194,60 @@ class Controller:
         total = sum(r[3] for r in task.results)
         level = compat.WARNING if task.messages or task.invalid else compat.SUCCESS
         self.message(tr("{}: {} rows loaded.").format(label, total), level)
+
+    # records ----------------------------------------------------------------
+    def show_record(self, label, headers, row, geometry_column):
+        """Put one previewed row on the map, in a temporary layer per source,
+        select it and zoom to it. The preview already holds the geometry
+        (Redshift prints GEOMETRY as EWKB hex), so no key and no new query
+        are needed. Returns (layer, feature id) or None."""
+        if geometry_column not in headers:
+            self.message(tr("Column {} is not in the result.").format(geometry_column), compat.WARNING)
+            return None
+        index = headers.index(geometry_column)
+        value = row[index]
+        try:
+            wkb, srid = sql.ewkb_to_iso(value) if value is not None else (None, 0)
+        except Exception:  # noqa: BLE001 - not a geometry
+            wkb, srid = None, 0
+        geom = QgsGeometry()
+        if wkb:
+            geom.fromWkb(wkb)
+        if geom.isNull():
+            self.message(tr("This row has no geometry in {}.").format(geometry_column), compat.WARNING)
+            return None
+        crs = QgsCoordinateReferenceSystem(f"EPSG:{srid}") if srid else QgsCoordinateReferenceSystem()
+        if not crs.isValid():
+            crs = QgsCoordinateReferenceSystem("EPSG:4326")
+        layer = self._record_layer(label, headers, index, geom.wkbType(), crs)
+        feature = QgsFeature(layer.fields())
+        feature.setAttributes([None if v is None else str(v) for i, v in enumerate(row) if i != index])
+        feature.setGeometry(geom)
+        ok, added = layer.dataProvider().addFeatures([feature])
+        if not ok or not added:
+            return None
+        fid = added[0].id()
+        layer.updateExtents()
+        layer.selectByIds([fid])
+        if self.iface is not None:
+            canvas = self.iface.mapCanvas()
+            canvas.zoomToFeatureIds(layer, [fid])
+            canvas.flashFeatureIds(layer, [fid])
+        return layer, fid
+
+    def _record_layer(self, label, headers, geometry_index, wkb_type, crs):
+        type_name = QgsWkbTypes.displayString(wkb_type)
+        key = (label, type_name, crs.authid(), tuple(headers))
+        layer = QgsProject.instance().mapLayer(self.record_layers.get(key, ""))
+        if layer is not None:
+            return layer
+        layer = QgsVectorLayer(f"{type_name}?crs={crs.authid()}", tr("{} (records)").format(label), "memory")
+        names = sql.unique_names([h for i, h in enumerate(headers) if i != geometry_index])
+        layer.dataProvider().addAttributes([QgsField(n, compat.FIELD_TYPES["string"]) for n in names])
+        layer.updateFields()
+        QgsProject.instance().addMapLayer(layer)
+        self.record_layers[key] = layer.id()
+        return layer
 
     def message(self, text, level):
         if self.iface is not None:

@@ -5,6 +5,8 @@
 No QGIS imports here, so this module can be unit tested with plain pytest.
 """
 
+import struct
+
 # Single-node clusters reject FETCH above 1000 rows; multi-node clusters
 # accept more, but 1000 works everywhere.
 FETCH_SIZE = 1000
@@ -157,8 +159,8 @@ def describe_query(text):
     return f"SELECT * FROM {query_from(text)} LIMIT 0"
 
 
-def preview_query(from_clause, limit=PREVIEW_ROWS):
-    return f"SELECT * FROM {from_clause} LIMIT {int(limit)}"
+def preview_query(from_clause, limit=PREVIEW_ROWS, where=None):
+    return f"SELECT * FROM {from_clause}{_where(None, where)} LIMIT {int(limit)}"
 
 
 def _where(geom_expr, where):
@@ -222,3 +224,70 @@ def wkb_bytes(value):
     if isinstance(value, str):
         return bytes.fromhex(value[2:] if value.startswith("\\x") else value)
     return bytes(value)
+
+
+# EWKB (what Redshift prints for GEOMETRY) flags the type with Z, M and SRID
+# bits and may embed the SRID; ISO WKB (what QGIS reads) encodes Z/M as
+# +1000/+2000 on the type and carries no SRID.
+_EWKB_Z = 0x80000000
+_EWKB_M = 0x40000000
+_EWKB_SRID = 0x20000000
+
+
+def ewkb_to_iso(value):
+    """(ISO WKB bytes, SRID or 0) from EWKB given as hex text or bytes.
+    ISO WKB input passes through unchanged."""
+    data = wkb_bytes(value)
+    out = bytearray()
+    srid = [0]
+    end = _convert_geometry(data, 0, out, srid)
+    if end != len(data):
+        raise ValueError("trailing bytes after the geometry")
+    return bytes(out), srid[0]
+
+
+def _convert_geometry(data, pos, out, srid):
+    order = data[pos]
+    if order not in (0, 1):
+        raise ValueError("not WKB")
+    e = "<" if order == 1 else ">"
+    (raw,) = struct.unpack_from(e + "I", data, pos + 1)
+    pos += 5
+    has_z, has_m = bool(raw & _EWKB_Z), bool(raw & _EWKB_M)
+    if raw & _EWKB_SRID:
+        (found,) = struct.unpack_from(e + "I", data, pos)
+        pos += 4
+        srid[0] = srid[0] or found
+    base = raw & 0x0FFFFFFF
+    if base >= 1000:  # already ISO
+        has_z = has_z or base // 1000 in (1, 3)
+        has_m = has_m or base // 1000 in (2, 3)
+        base %= 1000
+    point = 8 * (2 + has_z + has_m)
+    out += bytes([order]) + struct.pack(e + "I", base + 1000 * has_z + 2000 * has_m)
+
+    def copy(n):
+        nonlocal pos
+        out.extend(data[pos:pos + n])
+        if pos + n > len(data):
+            raise ValueError("truncated WKB")
+        pos += n
+
+    def count():
+        (n,) = struct.unpack_from(e + "I", data, pos)
+        copy(4)
+        return n
+
+    if base == 1:
+        copy(point)
+    elif base == 2:
+        copy(count() * point)
+    elif base == 3:
+        for _ in range(count()):
+            copy(count() * point)
+    elif base in (4, 5, 6, 7):
+        for _ in range(count()):
+            pos = _convert_geometry(data, pos, out, srid)
+    else:
+        raise ValueError(f"unsupported WKB type {base}")
+    return pos
