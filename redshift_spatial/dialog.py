@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from qgis.core import QgsCoordinateReferenceSystem
 from qgis.gui import QgsAuthConfigSelect, QgsFileWidget, QgsProjectionSelectionWidget
+from qgis.PyQt.QtCore import QLocale
 from qgis.PyQt.QtGui import QCursor, QFontDatabase, QKeySequence
 from qgis.PyQt.QtWidgets import (
     QApplication,
@@ -36,6 +37,10 @@ from .compat import QAction
 from .controller import icon, tr
 
 SSL_MODES = ["require", "verify-ca", "verify-full", "prefer", "allow", "disable"]
+
+
+def number(n):
+    return QLocale().toString(int(n))
 CELL_CHARS = 200
 
 
@@ -189,14 +194,26 @@ class OptionsForm(QWidget):
 
 
 class LoadOptionsDialog(QDialog):
-    """Asked from the Browser panel ("Add Layer with Filter…")."""
+    """Load options ("Add Layer with Filter…", the preview's Add Layer).
+    With a controller and a connection it also counts the rows the load
+    will bring, again whenever the filter or the limit changes."""
 
-    def __init__(self, source, parent=None, where=""):
+    def __init__(self, source, parent=None, where="", controller=None, conn=None):
         super().__init__(parent)
+        self.source = source
+        self.controller = controller
+        self.conn = conn
+        self.total = None
+        self.task = None
+        self.serial = 0
         self.setWindowTitle(tr("Add {}").format(sources.label(source)))
         self.setWindowIcon(icon())
         self.form = OptionsForm(with_crs=bool(source["column"]))
         self.form.where.setText(where or "")
+        self.count_label = QLabel()
+        self.count_label.setWordWrap(True)
+        self.form.where.editingFinished.connect(self.recount)
+        self.form.limit.valueChanged.connect(self.show_count)
         buttons = QDialogButtonBox(compat.CANCEL)
         buttons.addButton(tr("Add Layer"), compat.ACCEPT_ROLE)
         buttons.accepted.connect(self.accept)
@@ -205,8 +222,64 @@ class LoadOptionsDialog(QDialog):
         detail = f" ({source['column']})" if source["column"] else tr(" (no geometry)")
         layout.addWidget(QLabel(sources.label(source) + detail))
         layout.addWidget(self.form)
+        layout.addWidget(self.count_label)
         layout.addWidget(buttons)
         self.resize(520, self.sizeHint().height())
+        self.counted_where = None
+        self.recount()
+
+    def count_sql(self):
+        src = self.source
+        geom = sql.geometry_expression(src["column"], src["data_type"]) if src["column"] else None
+        if src["kind"] == "table":
+            from_clause = sql.table_ref(src["schema"], src["table"])
+        else:
+            from_clause = sql.query_from(src["sql"])
+        # same rows as the load: with a geometry, rows without one are left out
+        return sql.count_query(from_clause, geom, self.form.where.text())
+
+    def recount(self):
+        where = sql.clean_filter(self.form.where.text())
+        if self.controller is None or self.conn is None or where == self.counted_where:
+            return
+        self.counted_where = where
+        cancel_task(self.task)
+        self.task, self.total = None, None
+        self.serial += 1
+        serial = self.serial
+        self.count_label.setText(tr("Counting rows…"))
+        done = []
+
+        def latest_only(task, ok):
+            done.append(True)
+            if serial != self.serial:
+                return
+            self.task = None
+            self.total = task.total if ok else None
+            if not ok and task.error is not None:
+                self.count_label.setText(failure_text(task))
+                set_error(self.count_label, True)
+            else:
+                self.show_count()
+
+        task = self.controller.run_query(self.conn, None, "count", latest_only, self, count_query=self.count_sql())
+        if task is not None and not done:  # the count may already be here
+            self.task = task
+
+    def show_count(self, *args):
+        if self.total is None:
+            return
+        set_error(self.count_label, False)
+        limit = self.form.limit.value()
+        if limit and limit < self.total:
+            text = tr("{} of {} matching rows will be loaded (row limit).").format(number(limit), number(self.total))
+        else:
+            text = tr("{} rows will be loaded.").format(number(self.total))
+        self.count_label.setText(text)
+
+    def reject(self):
+        cancel_task(self.task)
+        super().reject()
 
 
 # results ------------------------------------------------------------------------
@@ -236,14 +309,36 @@ def failure_text(task):
 SELECTED, ALL = "selected", "all"
 
 
-def ask_scope(parent, selected):
+def shown_text(shown, total):
+    if total is None:
+        return tr("{} rows.").format(number(shown))
+    if total > shown:
+        return tr("Showing {} of {} matching rows.").format(number(shown), number(total))
+    return tr("All {} matching rows shown.").format(number(total))
+
+
+def choose_scope(parent, selected, total):
+    """SELECTED, ALL or None for Add Layer: with nothing selected, every
+    row; when the selection already is every matching row, no question."""
+    if not selected:
+        return ALL
+    if total is not None and selected >= total:
+        return SELECTED
+    return ask_scope(parent, selected, total)
+
+
+def ask_scope(parent, selected, total=None):
     """Add Layer with rows selected: only those rows, or every row of the
     query? Returns SELECTED, ALL or None (cancel)."""
     box = QMessageBox(parent)
     box.setWindowTitle(tr("Add Layer"))
-    box.setText(tr("{} row(s) are selected. What should the new layer contain?").format(selected))
-    only = box.addButton(tr("Only the {} selected").format(selected), compat.MB_ACCEPT_ROLE)
-    every = box.addButton(tr("All matching rows"), compat.MB_ACTION_ROLE)
+    text = tr("{} row(s) are selected. What should the new layer contain?").format(number(selected))
+    if total is not None:
+        text += "\n" + tr("{} rows match the filter.").format(number(total))
+    box.setText(text)
+    only = box.addButton(tr("Only the {} selected").format(number(selected)), compat.MB_ACCEPT_ROLE)
+    every_text = tr("All {} matching rows").format(number(total)) if total is not None else tr("All matching rows")
+    every = box.addButton(every_text, compat.MB_ACTION_ROLE)
     box.addButton(compat.CANCEL_BUTTON)
     box.setDefaultButton(only)
     box.exec()
@@ -386,6 +481,7 @@ class PreviewDialog(QDialog):
         self.task = None
         self.done = False
         self.map_note = ""
+        self.total = None
         self.setWindowTitle(tr("Preview {}").format(sources.label(source)))
         self.setWindowIcon(icon())
         self.resize(900, 520)
@@ -461,7 +557,12 @@ class PreviewDialog(QDialog):
             if serial == self.serial:
                 self.show_result(task, ok)
 
-        task = self.controller.run_query(self.conn, query, sources.label(self.source), latest_only, self)
+        count = sql.count_query(
+            sql.table_ref(self.source["schema"], self.source["table"]), None, self.where.text()
+        )
+        task = self.controller.run_query(
+            self.conn, query, sources.label(self.source), latest_only, self, count_query=count
+        )
         if task is None:
             self.status.setText(tr("Canceled."))
         elif not self.done:  # the result may already be here
@@ -473,7 +574,8 @@ class PreviewDialog(QDialog):
         if ok:
             self.table.set_result(task.headers, task.rows)
             self.filter.set_columns(task.headers)
-            self.status.setText(tr("{} rows.").format(len(task.rows)) + self.map_note)
+            self.total = task.total
+            self.status.setText(shown_text(len(task.rows), task.total) + self.map_note)
             set_error(self.status, False)
         else:
             # Never leave the previous rows on screen: they look like an
@@ -519,13 +621,14 @@ class PreviewDialog(QDialog):
         """Only the selected rows (saved from the preview), or every row
         matching the current WHERE (loaded again, with the usual options)."""
         selected = self.table.selected_rows()
-        scope = ask_scope(self, len(selected)) if selected else ALL
+        scope = choose_scope(self, len(selected), self.total)
         if scope == SELECTED:
             self.controller.save_rows(
                 sources.label(self.source), self.table.headers, selected, self.source["column"]
             )
         elif scope == ALL:
-            dlg = LoadOptionsDialog(self.source, self, where=sql.clean_filter(self.where.text()))
+            dlg = LoadOptionsDialog(self.source, self, where=sql.clean_filter(self.where.text()),
+                                    controller=self.controller, conn=self.conn)
             if dlg.exec():
                 self.controller.load(self.conn, self.source, dlg.form.options(), self)
 
@@ -568,6 +671,7 @@ class SqlDialog(QDialog):
         super().__init__(parent)
         self.controller = controller
         self.task = None
+        self.total = None
         self.setWindowTitle(tr("Redshift Spatial — SQL"))
         self.setWindowIcon(icon())
         self.resize(960, 720)
@@ -661,7 +765,8 @@ class SqlDialog(QDialog):
         self.status.setText(tr("Running…"))
         self.run_button.setEnabled(False)
         self.done = False
-        task = self.controller.run_query(conn, preview, "SQL", self.show_result, self)
+        count = sql.count_query(sql.query_from(text))
+        task = self.controller.run_query(conn, preview, "SQL", self.show_result, self, count_query=count)
         if task is None:
             self.run_button.setEnabled(True)
             self.status.setText(tr("Canceled."))
@@ -685,7 +790,8 @@ class SqlDialog(QDialog):
         set_error(self.status, False)
         self.table.set_result(task.headers, task.rows)
         self.filter.set_columns(task.headers)
-        self.status.setText(tr("{} rows shown (at most {}).").format(len(task.rows), sql.SQL_PREVIEW_ROWS))
+        self.total = task.total
+        self.status.setText(shown_text(len(task.rows), task.total))
         previous = self.geometry.currentText()
         self.geometry.clear()
         self.geometry.addItem(self.NO_GEOMETRY)
@@ -728,7 +834,7 @@ class SqlDialog(QDialog):
         column = None if column == self.NO_GEOMETRY else column
         name = self.layer_name.text().strip() or "query"
         selected = self.table.selected_rows()
-        scope = ask_scope(self, len(selected)) if selected else ALL
+        scope = choose_scope(self, len(selected), self.total)
         if scope == SELECTED:
             self.controller.save_rows(name, self.table.headers, selected, column)
         elif scope == ALL:

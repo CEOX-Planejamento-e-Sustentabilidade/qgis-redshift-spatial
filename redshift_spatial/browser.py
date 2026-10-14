@@ -215,7 +215,8 @@ class TableItem(QgsDataCollectionItem):
         self.controller.load(self.connection(), self.source, options)
 
     def add_layer_with_filter(self):
-        dlg = LoadOptionsDialog(self.source, self.controller.parent_window())
+        dlg = LoadOptionsDialog(self.source, self.controller.parent_window(),
+                                controller=self.controller, conn=self.connection())
         if dlg.exec():
             self.controller.load(self.connection(), self.source, dlg.form.options())
 

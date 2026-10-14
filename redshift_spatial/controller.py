@@ -114,20 +114,22 @@ class Controller:
         QgsApplication.taskManager().addTask(task)
         self.message(tr("Loading {}…").format(sources.label(source)), compat.INFO)
 
-    def run_query(self, conn, query, label, on_done, parent=None):
+    def run_query(self, conn, query, label, on_done, parent=None, count_query=None):
         """Run a small SELECT in the background; on_done(task, ok) gets the
         headers and rows. Returns the task (to cancel it) or None."""
         params = self.params(conn, parent or self.parent_window())
         if params is None:
             return None
-        QgsMessageLog.logMessage(f"{label}: {query}", LOG_TAG, compat.INFO)
+        for text in (query, count_query):
+            if text:
+                QgsMessageLog.logMessage(f"{label}: {text}", LOG_TAG, compat.INFO)
 
         def done(task, ok):
             if task in self.tasks:
                 self.tasks.remove(task)
             on_done(task, ok)
 
-        task = QueryTask(params, query, label, done)
+        task = QueryTask(params, query, label, done, count_query)
         self.tasks.append(task)
         QgsApplication.taskManager().addTask(task)
         return task

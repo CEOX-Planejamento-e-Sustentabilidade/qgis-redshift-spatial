@@ -292,13 +292,15 @@ class QueryTask(QgsTask):
     header and rows for the callback. cancel() also cancels the statement
     on the server."""
 
-    def __init__(self, params, query, label, on_finished):
+    def __init__(self, params, query, label, on_finished, count_query=None):
         super().__init__(f"Redshift: {label}", compat.CAN_CANCEL)
         self.params = params
         self.query = query
+        self.count_query = count_query
         self.on_finished = on_finished
         self.headers = []
         self.rows = []
+        self.total = None  # rows matching, when count_query is given
         self.error = None
         self._conn = None
 
@@ -306,9 +308,17 @@ class QueryTask(QgsTask):
         try:
             self._conn = db.connect(self.params)
             with closing(self._conn), self._conn.cursor() as cur:
-                cur.execute(self.query)
-                self.headers = [d[0] for d in cur.description or []]
-                self.rows = cur.fetchall()
+                if self.query:
+                    cur.execute(self.query)
+                    self.headers = [d[0] for d in cur.description or []]
+                    self.rows = cur.fetchall()
+                if self.count_query and not self.isCanceled():
+                    try:
+                        cur.execute(self.count_query)
+                        self.total = int(cur.fetchone()[0])
+                    except Exception:  # noqa: BLE001 - the rows are still useful
+                        if not self.query:
+                            raise
             return True
         except Exception as e:
             if not self.isCanceled():

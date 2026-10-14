@@ -45,16 +45,20 @@ class SyncController(Controller):
         self.fake = fake
         self.loads = []
         self.queries = []
+        self.counts = []
 
     def params(self, conn, parent=None):
         return {}
 
-    def run_query(self, conn, query, label, on_done, parent=None):
-        self.queries.append(query)
+    def run_query(self, conn, query, label, on_done, parent=None, count_query=None):
+        if query:
+            self.queries.append(query)
+        if count_query:
+            self.counts.append(count_query)
         original = db.connect
         db.connect = self.fake.connect
         try:
-            task = loader.QueryTask({}, query, label, lambda *a: None)
+            task = loader.QueryTask({}, query, label, lambda *a: None, count_query)
             ok = task.run()
         finally:
             db.connect = original
@@ -328,7 +332,7 @@ def test_preview_where_and_limit_rerun_on_the_server():
     dlg.limit.setValue(3)
     dlg.run()
     assert ctl.queries[-1] == 'SELECT * FROM "s"."t" WHERE (id > 2) LIMIT 3'
-    assert dlg.task is None and dlg.status.text() == "3 rows."
+    assert dlg.task is None and dlg.status.text().startswith("Showing 3 of 5 matching rows.")
 
 
 def test_show_record_puts_the_row_on_the_map():
@@ -441,7 +445,7 @@ def test_preview_ignores_results_of_superseded_queries():
     ctl = SyncController(fake)
     pending = []
 
-    def deferred(conn, query, label, on_done, parent=None):
+    def deferred(conn, query, label, on_done, parent=None, count_query=None):
         task = loader.QueryTask({}, query, label, lambda *a: None)
         pending.append((task, on_done, query))
         return task
@@ -649,7 +653,7 @@ def test_add_layer_asks_when_rows_are_selected():
 
     answers = []
     original = dialog.ask_scope
-    dialog.ask_scope = lambda parent, n: answers.append(n) or dialog.SELECTED
+    dialog.ask_scope = lambda parent, n, total=None: answers.append(n) or dialog.SELECTED
     try:
         dlg.add_layer()
         assert answers == [1]
@@ -657,11 +661,11 @@ def test_add_layer_asks_when_rows_are_selected():
         assert saved.featureCount() == 1 and next(saved.getFeatures())["id"] == 1
         assert not ctl.loads  # nothing queried again
 
-        dialog.ask_scope = lambda parent, n: None  # cancel
+        dialog.ask_scope = lambda parent, n, total=None: None  # cancel
         dlg.add_layer()
         assert not ctl.loads
 
-        dialog.ask_scope = lambda parent, n: dialog.ALL
+        dialog.ask_scope = lambda parent, n, total=None: dialog.ALL
         accept = dialog.LoadOptionsDialog.exec
         dialog.LoadOptionsDialog.exec = lambda self: True
         try:
@@ -693,3 +697,74 @@ def test_ask_scope_dialog_builds_and_cancel_returns_none():
     assert "Only the 3 selected" in seen["buttons"] and "All matching rows" in seen["buttons"]
     assert dialog.scope_label(0) == "Add Layer (all matching)…"
     assert dialog.scope_label(3) == "Add Layer (3 selected)…"
+
+
+# counts ---------------------------------------------------------------------------------
+
+
+def test_preview_shows_how_many_rows_match():
+    rows = [(i,) for i in range(150)]
+    ctl = SyncController(FakeRedshift([("id", "integer")], rows))
+    dlg = dialog.open_preview(ctl, CONN, sources.table("s", "big"))
+    assert dlg.table.rowCount() == 100 and dlg.total == 150
+    assert dlg.status.text().startswith("Showing 100 of 150 matching rows.")
+    assert ctl.counts[-1] == 'SELECT COUNT(*) FROM "s"."big"'
+    dlg.where.setText("id > 10")
+    dlg.run()
+    assert ctl.counts[-1] == 'SELECT COUNT(*) FROM "s"."big" WHERE (id > 10)'
+    dlg.limit.setValue(500)
+    dlg.run()
+    assert dlg.status.text().startswith("All 150 matching rows shown.")
+    dlg.reject()
+
+
+def test_count_failure_keeps_the_preview_rows():
+    fake = FakeRedshift([("id", "integer")], [(1,), (2,)], fail_on="COUNT(*)")
+    ctl = SyncController(fake)
+    dlg = dialog.open_preview(ctl, CONN, sources.table("s", "nocount"))
+    assert dlg.table.rowCount() == 2 and dlg.total is None
+    assert dlg.status.text().startswith("2 rows.")
+    dlg.reject()
+
+
+def test_scope_question_uses_the_total():
+    asked = []
+    original = dialog.ask_scope
+    dialog.ask_scope = lambda parent, n, total=None: asked.append((n, total)) or dialog.ALL
+    try:
+        assert dialog.choose_scope(None, 0, 500) == dialog.ALL and not asked
+        assert dialog.choose_scope(None, 100, 100) == dialog.SELECTED and not asked  # selection is everything
+        assert dialog.choose_scope(None, 100, 12345) == dialog.ALL and asked == [(100, 12345)]
+        assert dialog.choose_scope(None, 3, None) == dialog.ALL and asked[-1] == (3, None)
+    finally:
+        dialog.ask_scope = original
+
+    from qgis.PyQt.QtWidgets import QMessageBox
+
+    seen = {}
+    exec_ = QMessageBox.exec
+    QMessageBox.exec = lambda box: seen.update(text=box.text(), buttons=[b.text() for b in box.buttons()]) or 0
+    try:
+        dialog.ask_scope(None, 100, 12345)
+    finally:
+        QMessageBox.exec = exec_
+    assert dialog.number(12345) in seen["text"]
+    assert f"All {dialog.number(12345)} matching rows" in seen["buttons"]
+
+
+def test_load_options_count_what_will_be_loaded():
+    rows = [(i, hex_wkb(f"POINT({i} {i})")) for i in range(40)]
+    ctl = SyncController(FakeRedshift([("id", "integer"), ("shape", "geometry")], rows))
+    dlg = dialog.LoadOptionsDialog(sources.table("s", "pts", "shape"), where="id < 100", controller=ctl, conn=CONN)
+    assert ctl.counts[-1] == 'SELECT COUNT(*) FROM "s"."pts" WHERE "shape" IS NOT NULL AND (id < 100)'
+    assert dlg.count_label.text() == "40 rows will be loaded."
+    dlg.form.limit.setValue(10)
+    assert dlg.count_label.text() == "10 of 40 matching rows will be loaded (row limit)."
+    before = len(ctl.counts)
+    dlg.recount()  # same filter: no new query
+    assert len(ctl.counts) == before
+    dlg.form.where.setText("id < 5")
+    dlg.recount()
+    assert ctl.counts[-1].endswith("(id < 5)")
+    plain = dialog.LoadOptionsDialog(sources.table("s", "pts"))  # without controller: no count
+    assert plain.count_label.text() == ""

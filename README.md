@@ -27,7 +27,8 @@ GeoPackage that QGIS opens natively.
   Spatial*): run any `SELECT`, see the first rows and add the result as a
   layer, picking the geometry column, or as a table without geometry.
   Queries always run wrapped as a subquery, so they cannot change data.
-- **Preview Rows…** with a `WHERE` filter that runs on the whole table, a
+- **Preview Rows…** shows how many rows match ("Showing 100 of 12,345"),
+  with a `WHERE` filter that runs on the whole table, a
   quick filter over the rows shown (all columns or one), sortable columns,
   and **double click on a row (or select several and click *Show Selected on
   Map*) to see them on the map** (a temporary
@@ -41,7 +42,8 @@ GeoPackage that QGIS opens natively.
   (or are asked for once per session).
 - Spatial columns are discovered from `SVV_COLUMNS` (late-binding views
   included).
-- Optional `WHERE` filter and row limit.
+- Optional `WHERE` filter and row limit; the load options count the rows
+  that will be loaded before you confirm.
 - CRS from `ST_SRID`; a fallback CRS for SRID 0.
 - Runs as a background task with progress and cancel.
 - One layer per geometry family; single geometries are promoted to multi, so
