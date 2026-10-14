@@ -1,0 +1,48 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  secrets:
+    # Fails the build if a credential or endpoint-like secret is committed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: docker://zricethezav/gitleaks:v8.18.4
+        with:
+          args: detect --source . --verbose --redact
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: pytest
+
+  qgis:
+    # Smoke and edge-case tests inside the official QGIS images: the minimum
+    # supported version (metadata.txt), the LTR and the current release.
+    # "latest" tracks the next major (Qt6) and may break before we port.
+    name: qgis ${{ matrix.qgis }}
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.qgis == 'latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        qgis: [release-3_28, release-3_40, release-3_44, latest]
+    container:
+      image: qgis/qgis:${{ matrix.qgis }}
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - name: psycopg2
+        run: python3 -c "import psycopg2" || (apt-get update && apt-get install -y python3-psycopg2)
+      - run: python3 tests/run_qgis.py

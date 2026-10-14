@@ -1,0 +1,16 @@
+[general]
+name=Redshift Spatial
+qgisMinimumVersion=3.28
+description=Load GEOMETRY and GEOGRAPHY columns from Amazon Redshift as QGIS layers.
+about=QGIS cannot open Amazon Redshift tables through its PostgreSQL provider, because Redshift has no PostGIS. This plugin connects over the plain PostgreSQL protocol (psycopg2, bundled with QGIS), reads geometries as WKB with ST_AsBinary and writes them to a GeoPackage, one layer per geometry family. Tables and late-binding views are listed from SVV_COLUMNS. Read only.
+version=0.2.3
+author=CEOX Planejamento e Otimização
+email=ceox.dados@gmail.com
+homepage=https://github.com/CEOX-Planejamento-e-Sustentabilidade/qgis-redshift-spatial
+tracker=https://github.com/CEOX-Planejamento-e-Sustentabilidade/qgis-redshift-spatial/issues
+repository=https://github.com/CEOX-Planejamento-e-Sustentabilidade/qgis-redshift-spatial
+tags=redshift,aws,amazon,database,data warehouse,geometry,geography
+category=Database
+icon=icon.svg
+experimental=True
+deprecated=False
