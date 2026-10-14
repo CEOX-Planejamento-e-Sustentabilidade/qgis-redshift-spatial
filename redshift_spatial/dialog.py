@@ -333,11 +333,12 @@ class PreviewDialog(QDialog):
     """First rows of a table, optionally filtered on the server, without
     creating a layer. Double click a row to see it on the map."""
 
-    def __init__(self, controller, conn, source, parent=None):
+    def __init__(self, controller, conn, source, parent=None, where=""):
         super().__init__(parent)
         self.controller = controller
         self.conn = conn
         self.source = source
+        self.serial = 0  # only the latest query may fill the grid
         self.task = None
         self.done = False
         self.map_note = ""
@@ -348,10 +349,12 @@ class PreviewDialog(QDialog):
         self.where = QLineEdit()
         self.where.setPlaceholderText(tr("SQL filter on the whole table, e.g. region = 'north'"))
         self.where.returnPressed.connect(self.run)
+        self.where.setText(where or "")
         self.limit = QSpinBox()
         self.limit.setRange(1, 10_000)
         self.limit.setValue(sql.PREVIEW_ROWS)
         apply = QPushButton(tr("Apply"))
+        apply.setAutoDefault(False)  # Enter already runs the query via returnPressed
         apply.clicked.connect(self.run)
         self.filter_map = QCheckBox(tr("Also filter this table's layers on the map"))
         self.filter_map.setChecked(True)
@@ -389,7 +392,14 @@ class PreviewDialog(QDialog):
         )
         self.status.setText(tr("Running…"))
         self.map_note = self.filter_on_map()
-        task = self.controller.run_query(self.conn, query, sources.label(self.source), self.show_result, self)
+        self.serial += 1
+        serial = self.serial
+
+        def latest_only(task, ok):
+            if serial == self.serial:
+                self.show_result(task, ok)
+
+        task = self.controller.run_query(self.conn, query, sources.label(self.source), latest_only, self)
         if task is None:
             self.status.setText(tr("Canceled."))
         elif not self.done:  # the result may already be here
@@ -737,7 +747,7 @@ class LoadLayerDialog(QDialog):
         source = self.selected_source(item)
         conn = self.current_connection() if source else None
         if conn is not None:
-            PreviewDialog(self.controller, conn, source, self).show()
+            PreviewDialog(self.controller, conn, source, self, where=self.form.where.text()).show()
 
     def open_sql(self):
         SqlDialog(self.controller, self.conn_combo.currentText(), self).show()

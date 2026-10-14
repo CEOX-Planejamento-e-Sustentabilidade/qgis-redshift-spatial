@@ -115,6 +115,7 @@ class Controller:
         params = self.params(conn, parent or self.parent_window())
         if params is None:
             return None
+        QgsMessageLog.logMessage(f"{label}: {query}", LOG_TAG, compat.INFO)
 
         def done(task, ok):
             if task in self.tasks:
@@ -265,7 +266,13 @@ class Controller:
         expression must also be valid SQLite; simple comparisons are.
         Returns (filtered layers, layers that rejected the expression)."""
         done, failed = [], []
-        for layer in self.layers_for(label):
+        layers = self.layers_for(label)
+        if not layers:
+            QgsMessageLog.logMessage(
+                f"{label}: no layer on the map was loaded from this table (reload it to filter it).",
+                LOG_TAG, compat.INFO,
+            )
+        for layer in layers:
             previous = layer.subsetString()
             # The OGR provider accepts any text; an expression SQLite cannot
             # run only shows up as an unknown feature count (-1).

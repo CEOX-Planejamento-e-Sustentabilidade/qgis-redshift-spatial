@@ -433,3 +433,36 @@ def test_preview_error_clears_the_old_rows():
     dlg.where.setText("WHERE id = 2")
     dlg.run()
     assert ctl.queries[-1] == 'SELECT * FROM "s"."t" WHERE (id = 2) LIMIT 100'
+
+
+def test_preview_ignores_results_of_superseded_queries():
+    """Two runs in a row (Enter + Apply): only the latest may fill the grid."""
+    fake = FakeRedshift([("id", "integer")], [(i,) for i in range(5)])
+    ctl = SyncController(fake)
+    pending = []
+
+    def deferred(conn, query, label, on_done, parent=None):
+        task = loader.QueryTask({}, query, label, lambda *a: None)
+        pending.append((task, on_done, query))
+        return task
+
+    dlg = dialog.PreviewDialog(ctl, CONN, sources.table("s", "t"))
+    ctl.run_query = deferred
+    dlg.where.setText("id = 1")
+    dlg.run()
+    dlg.where.setText("id = 2")
+    dlg.run()
+    (old, old_done, _), (new, new_done, new_query) = pending
+    new.headers, new.rows = ["id"], [(2,)]
+    new_done(new, True)
+    old_done(old, False)  # the canceled first query reports last
+    assert dlg.table.rowCount() == 1 and dlg.table.raw_row(dlg.table.item(0, 0)) == (2,)
+    assert new_query.endswith("WHERE (id = 2) LIMIT 100")
+
+
+def test_preview_from_the_add_layer_window_uses_its_filter():
+    fake = FakeRedshift([("id", "integer")], [(1,)])
+    ctl = SyncController(fake)
+    dlg = dialog.PreviewDialog(ctl, CONN, sources.table("s", "t"), where="id = 1")
+    assert dlg.where.text() == "id = 1"
+    assert ctl.queries[-1] == 'SELECT * FROM "s"."t" WHERE (id = 1) LIMIT 100'
